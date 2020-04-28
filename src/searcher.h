@@ -51,18 +51,17 @@ using std::string;
 using std::cout;
 using std::endl;
 
-struct OTFClause
-{
-    Lit lits[3];
-    unsigned size;
-};
-
 struct VariableVariance
 {
     double avgDecLevelVarLT = 0;
     double avgTrailLevelVarLT= 0;
     double avgDecLevelVar = 0;
     double avgTrailLevelVar = 0;
+};
+
+struct ConflictData {
+    uint32_t nHighestLevel;
+    //bool bOnlyOneLitFromHighest = false;
 };
 
 class Searcher : public HyperEngine
@@ -106,6 +105,7 @@ class Searcher : public HyperEngine
         void     print_clause_stats() const;
         uint64_t sumRestarts() const;
         const SearchHist& getHistory() const;
+        void print_local_restart_budget();
 
         size_t hyper_bin_res_all(const bool check_for_set_values = true);
         std::pair<size_t, size_t> remove_useless_bins(bool except_marked = false);
@@ -132,8 +132,15 @@ class Searcher : public HyperEngine
                 return val ^ lit.sign();
             }
         }
+
+        vector<Trail> add_tmp_canceluntil;
         template<bool do_insert_var_order = true, bool update_bogoprops = false>
         void cancelUntil(uint32_t level); ///<Backtrack until a certain level.
+        ConflictData FindConflictLevel(PropBy& pb);
+        uint32_t chrono_backtrack = 0;
+        uint32_t non_chrono_backtrack = 0;
+        bool last_backtrack_is_chrono = false;
+
         bool check_order_heap_sanity() const;
 
         SQLStats* sqlStats = NULL;
@@ -177,6 +184,7 @@ class Searcher : public HyperEngine
 
         //Needed for tests around renumbering
         void rebuildOrderHeap();
+        void print_order_heap();
         void clear_order_heap()
         {
             order_heap_vsids.clear();
@@ -189,6 +197,7 @@ class Searcher : public HyperEngine
             vector<Lit>& out_learnt,
             bool True_confl
         );
+        void bump_var_importance(uint32_t var);
 
     protected:
         void new_var(const bool bva, const uint32_t orig_outer) override;
@@ -276,18 +285,15 @@ class Searcher : public HyperEngine
         bool  handle_conflict(PropBy confl);// Handles the conflict clause
         void  update_history_stats(size_t backtrack_level, uint32_t glue);
         template<bool update_bogoprops>
-        void  attach_and_enqueue_learnt_clause(Clause* cl, bool enq = true);
+        void  attach_and_enqueue_learnt_clause(Clause* cl, const uint32_t level, const bool enqueue);
         void  print_learning_debug_info() const;
         void  print_learnt_clause() const;
-        template<bool update_bogoprops>
-        void  add_otf_subsume_long_clauses();
-        template<bool update_bogoprops>
-        void  add_otf_subsume_implicit_clause();
-        Clause* handle_last_confl_otf_subsumption(
-            Clause* cl
-            , const uint32_t glue
-            , const uint32_t old_decision_level
-        );
+        void  print_lsids() const;
+
+        Clause* handle_last_confl(
+            const uint32_t glue
+            , const uint32_t old_decision_level);
+
         template<bool update_bogoprops>
         lbool new_decision();  // Handles the case when decision must be made
         void  check_need_restart();     // Helper function to decide if we need to restart during search
@@ -331,16 +337,20 @@ class Searcher : public HyperEngine
         size_t find_backtrack_level_of_learnt();
         template<bool update_bogoprops>
         void bump_var_activities_based_on_implied_by_learnts(const uint32_t backtrack_level);
-        Clause* otf_subsume_last_resolved_clause(Clause* last_resolved_long_cl);
         void print_debug_resolution_data(const PropBy confl);
         template<bool update_bogoprops>
-        Clause* create_learnt_clause(PropBy confl);
+        void create_learnt_clause(PropBy confl);
         int pathC;
         #ifdef STATS_NEEDED
         AtecedentData<uint16_t> antec_data;
         #endif
 
         vector<uint32_t> implied_by_learnts; //for glue-based extra var activity bumping
+
+        /////////////////
+        // Literal activity
+        double lit_inc_lsids;
+        double lit_decay_lsids;
 
         /////////////////
         // Variable activity
@@ -369,21 +379,12 @@ class Searcher : public HyperEngine
         void normalClMinim();
         MyStack<Lit> analyze_stack;
         uint32_t        abstractLevel(const uint32_t x) const;
-
-        //OTF subsumption during learning
-        vector<ClOffset> otf_subsuming_long_cls;
-        vector<OTFClause> otf_subsuming_short_cls;
-        void check_otf_subsume(const ClOffset offset, Clause& cl);
-        void create_otf_subsuming_implicit_clause(const Clause& cl);
-        void create_otf_subsuming_long_clause(Clause& cl, ClOffset offset);
         template<bool update_bogoprops>
-        Clause* add_literals_from_confl_to_learnt(const PropBy confl, const Lit p);
+        void add_literals_from_confl_to_learnt(const PropBy confl, const Lit p, uint32_t nDecisionLevel);
         void debug_print_resolving_clause(const PropBy confl) const;
         template<bool update_bogoprops>
-        void add_lit_to_learnt(Lit lit);
+        void add_lit_to_learnt(Lit lit, uint32_t nDecisionLevel);
         void analyze_final_confl_with_assumptions(const Lit p, vector<Lit>& out_conflict);
-        size_t tmp_learnt_clause_size;
-        cl_abst_type tmp_learnt_clause_abst;
 
         //Restarts
         uint64_t max_confl_per_search_solve_call;
@@ -429,6 +430,13 @@ class Searcher : public HyperEngine
         template<bool update_bogoprops>
         void     bump_vsids_var_act(uint32_t v, double mult = 1.0);
 
+        // Implementation of LSIDS phase selection heuristic
+        ///Increase a literal with the current 'bump' value.
+        // TODO : Why should it have update_bogoprops template?
+        template<bool update_bogoprops>
+        void     bump_lsids_lit_act(Lit lit, double mult = 1.0);
+        void     litDecayActivity ();
+
         //Clause activites
         double cla_inc;
 
@@ -459,6 +467,7 @@ class Searcher : public HyperEngine
 
         //Picking polarity when doing decision
         bool     pick_polarity(const uint32_t var);
+        bool     pick_lsids_phase(const uint32_t var);
 
         //Last time we clean()-ed the clauses, the number of zero-depth assigns was this many
         size_t   lastCleanZeroDepthAssigns;
@@ -561,8 +570,39 @@ inline void Searcher::decayClauseAct()
     cla_inc *= (1 / conf.clause_decay);
 }
 
+inline bool Searcher::pick_lsids_phase(const uint32_t var){
+    Lit neg_lit = Lit(var, true);
+    Lit pos_lit = Lit(var, false);
+
+    double neg_lsids = lit_act_lsids[neg_lit.toInt()];
+    double pos_lsids = lit_act_lsids[pos_lit.toInt()];
+
+    #ifdef VERBOSE_DEBUG
+    cout << "c [Debug] Picking variable " << var
+    << " polarity : " << (neg_lsids < pos_lsids)
+    << " saved phase : " << varData[var].polarity << endl;
+    #endif
+
+    if ((neg_lsids < pos_lsids) != varData[var].polarity){
+        stats.lsids_opp_cached++;
+    }
+
+
+    if(neg_lsids > pos_lsids){
+        return false;
+    }
+    else {
+        return true;
+    }
+}
+
 inline bool Searcher::pick_polarity(const uint32_t var)
 {
+    if(conf.chronophase == 1 && last_backtrack_is_chrono){
+        stats.chrono_decisions++;
+        return pick_lsids_phase(var);
+    }
+
     switch(conf.polarity_mode) {
         case PolarityMode::polarmode_neg:
             return false;
@@ -581,6 +621,26 @@ inline bool Searcher::pick_polarity(const uint32_t var)
     }
 
     return true;
+}
+
+
+template<bool update_bogoprops>
+inline void Searcher::bump_lsids_lit_act(Lit lit, double mult)
+{
+    if (update_bogoprops) {
+        return;
+    }
+    lit_act_lsids[lit.toInt()] += lit_inc_lsids * mult;
+
+    if (lit_act_lsids[lit.toInt()] > 1e100) {
+        // Rescale:
+        for (double& act : lit_act_lsids) {
+            act *= 1e-100;
+        }
+
+        //Reset lit_inc
+        lit_inc_lsids *= 1e-100;
+    }
 }
 
 template<bool update_bogoprops>

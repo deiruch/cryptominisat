@@ -99,6 +99,14 @@ option(BUILD_SHARED_LIBS "Build the shared library" ON)
 option(STATICCOMPILE "Compile to static executable" OFF)
 if (STATICCOMPILE)
     set(BUILD_SHARED_LIBS OFF)
+    set(Boost_USE_STATIC_LIBS ON)
+#     if (IPASIR)
+#         if ( ${CMAKE_SYSTEM_NAME} MATCHES "Linux")
+#             set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -Wl,--whole-archive -ldl -lpthread -Wl,--no-whole-archive -static ")
+#             SET(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+#             add_compile_options( -static-libstdc++)
+#         endif()
+#     endif()
 endif()
 
 option(NOVALGRIND "Don't use valgrind" ON)
@@ -155,7 +163,6 @@ macro(add_sanitize_flags)
 if (SANITIZE)
     MESSAGE(WARNING "Using clang sanitizers -- you MUST use clang++ or the compile WILL fail")
     add_sanitize_option("-fsanitize=address")
-    add_sanitize_option("-fsanitize=integer")
     add_sanitize_option("-fsanitize=undefined")
 
     add_sanitize_option("-fsanitize=null")
@@ -166,7 +173,6 @@ if (SANITIZE)
     add_sanitize_option("-fsanitize=bounds")
     add_sanitize_option("-fsanitize=float-divide-by-zero")
     add_sanitize_option("-fsanitize=integer-divide-by-zero")
-    add_sanitize_option("-fsanitize=unsigned-integer-overflow")
     add_sanitize_option("-fsanitize=signed-integer-overflow")
     add_sanitize_option("-fsanitize=bool")
     add_sanitize_option("-fsanitize=enum")
@@ -302,7 +308,7 @@ endif()
 
 if (NOT WIN32)
     if(NOT ENABLE_TESTING AND ${CMAKE_SYSTEM_NAME} MATCHES "Linux" AND NOT COVERAGE)
-        #add_cxx_flag_if_supported("-fvisibility=hidden")
+        add_cxx_flag_if_supported("-fvisibility=hidden")
     endif()
     add_compile_options("-fPIC")
     #add_cxx_flag_if_supported("-mtune=native")
@@ -417,7 +423,7 @@ if (GIT_EXECUTABLE)
 else()
   set(GIT_SHA "GIT-hash-notfound")
 endif()
-set(CMS_FULL_VERSION "5.6.8")
+set(CMS_FULL_VERSION "5.7.0")
 
 string(REPLACE "." ";" CMS_FULL_VERSION_LIST ${CMS_FULL_VERSION})
 SetVersionNumber("PROJECT" ${CMS_FULL_VERSION_LIST})
@@ -671,26 +677,6 @@ endif()
 if (NOT (PYTHONINTERP_FOUND AND PYTHONLIBS_FOUND AND PYTHON_INCLUDE_DIRS) AND FORCE_PYTHON2)
     message(FATAL_ERROR "Forced Python2 but did not find Python2")
 endif()
-
-
-# -----------------------------------------------------------------------------
-# Look for rust
-# disabled -- not sure how Rust bindings should be built....
-# maybe just use Cargo and don't build the interface from CMake?
-# -----------------------------------------------------------------------------
-# find_package(rustc)
-# find_package(rustdoc)
-# find_package(cargo)
-# if (RUSTC_EXECUTABLE AND CARGO_EXECUTABLE AND RUSTDOC_EXECUTABLE)
-#     #set(BUILD_RUST_INTERFACE)
-#     message(STATUS "RUST -- RUSTC_EXECUTABLE=${RUSTC_EXECUTABLE}")
-#     message(STATUS "RUST -- CARGO_EXECUTABLE=${CARGO_EXECUTABLE}")
-#     message(STATUS "RUST -- RUSTDOC_EXECUTABLE=${RUSTDOC_EXECUTABLE}")
-#
-#     include(Rust)
-#     add_subdirectory(rust rustinterf)
-# endif()
-
 
 #command-line parsing executable needs boost program-options
 if(NOT Boost_FOUND)
