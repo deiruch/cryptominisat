@@ -434,6 +434,7 @@ MESSAGE(STATUS "PROJECT_VERSION_PATCH: ${PROJECT_VERSION_PATCH}")
 
 option(ONLY_SIMPLE "Only build very simplistic executable -- no Boost needed" OFF)
 if (NOT ONLY_SIMPLE)
+    cmake_policy(SET CMP0074 NEW)
     find_package( Boost 1.46 COMPONENTS program_options)
 endif()
 

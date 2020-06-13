@@ -1,0 +1,42 @@
+﻿{
+  "configurations": [
+    {
+      "name": "x64-Release",
+      "generator": "Ninja",
+      "configurationType": "Release",
+      "inheritEnvironments": [ "msvc_x64_x64" ],
+      "buildRoot": "${projectDir}\\out\\build\\${name}",
+      "installRoot": "${projectDir}\\out\\install\\${name}",
+      "cmakeCommandArgs": "",
+      "buildCommandArgs": "-v",
+      "ctestCommandArgs": "",
+      "variables": [
+        {
+          "name": "USE_GAUSS",
+          "value": "True",
+          "type": "BOOL"
+        },
+        {
+          "name": "STATICCOMPILE",
+          "value": "False",
+          "type": "BOOL"
+        },
+        {
+          "name": "ENABLE_ASSERTIONS",
+          "value": "False",
+          "type": "BOOL"
+        },
+        {
+          "name": "ENABLE_PYTHON_INTERFACE",
+          "value": "False",
+          "type": "BOOL"
+        },
+        {
+          "name": "BOOST_ROOT",
+          "value": "C:\\Users\\de\\Source\\Projects\\boost_1_59_0\\install",
+          "type": "PATH"
+        }
+      ]
+    }
+  ]
+}
