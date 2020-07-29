@@ -41,7 +41,6 @@ THE SOFTWARE.
 #include <cassert>
 #include <algorithm>
 #include "src/solver.h"
-#include "src/stamp.h"
 #include "src/xor.h"
 #include "cryptominisat5/cryptominisat.h"
 
@@ -128,6 +127,7 @@ vector<Xor> str_to_xors(const string& data)
         int at = 0;
         bool rhs = false;
         vector<uint32_t> vars;
+        vector<uint32_t> clashes;
         while (getline(ss2,token2, '='))
         {
             //cout << "Token is: " << token2 << endl;
@@ -135,15 +135,28 @@ vector<Xor> str_to_xors(const string& data)
                 vars = str_to_vars(token2);
             }
             if (at == 1) {
-                long r = str_to_long_int(token2);
-                assert(r >= 0 && r <= 1);
-                rhs = r;
+                uint32_t at2 = 0;
+                stringstream ss3(token2);
+                string token3;
+                //cout << "parsing token2:" << token2 << endl;
+                while (getline(ss3,token3, 'c')) {
+                    if (at2 == 0) {
+                        long r = str_to_long_int(token3);
+                        assert(r >= 0 && r <= 1);
+                        rhs = r;
+                    } else if (at2 == 1) {
+                        clashes = str_to_vars(token3);
+                    }
+                    assert(at2 < 2 && "We can have only at most one 'c' sign in an XOR");
+                    at2++;
+                }
             }
-            assert(at < 2);
+            assert(at < 2 && "We can ony have one '=' sign in an XOR");
             at++;
         }
+
         assert(at == 2 && "You forgot the =0/1 from the XOR");
-        ret.push_back(Xor(vars, rhs));
+        ret.push_back(Xor(vars, rhs, clashes));
     }
 
     return ret;
@@ -422,6 +435,13 @@ struct XorSorter
     }
 };
 
+
+void sort_xor(Xor& x)
+{
+    std::sort(x.vars.begin(), x.vars.end());
+    std::sort(x.clash_vars.begin(), x.clash_vars.end());
+}
+
 void check_xors_eq(const vector<Xor>& got_data, const std::string& expected)
 {
     XorSorter xorsort;
@@ -433,12 +453,17 @@ void check_xors_eq(const vector<Xor>& got_data, const std::string& expected)
     std::sort(expected_sorted.begin(), expected_sorted.end(), xorsort);
 
     vector<Xor> got_data_sorted = got_data;
-    for(auto t: got_data_sorted) {
-        std::sort(t.begin(), t.end());
+    for(Xor& t: got_data_sorted) {
+        sort_xor(t);
     }
 
     std::sort(got_data_sorted.begin(), got_data_sorted.end(), xorsort);
-    EXPECT_EQ(expected_sorted, got_data_sorted);
+    EXPECT_EQ(expected_sorted.size(), got_data_sorted.size());
+    for(size_t i = 0; i < expected_sorted.size(); i++) {
+        EXPECT_EQ(expected_sorted[i].vars, got_data_sorted[i].vars);
+        EXPECT_EQ(expected_sorted[i].rhs, got_data_sorted[i].rhs);
+        EXPECT_EQ(expected_sorted[i].clash_vars, got_data_sorted[i].clash_vars);
+    }
 }
 
 void check_xors_contains(const vector<Xor>& got_data, const std::string& expected)
@@ -449,92 +474,21 @@ void check_xors_contains(const vector<Xor>& got_data, const std::string& expecte
     std::sort(expectedX.begin(), expectedX.end());
 
     vector<Xor> got_data_sorted = got_data;
-    for(auto t: got_data_sorted) {
-        std::sort(t.begin(), t.end());
+    for(auto& t: got_data_sorted) {
+        sort_xor(t);
     }
 
     bool found = false;
     for(const Xor& x: got_data_sorted) {
-        if (x == expectedX) {
+        if (x.vars == expectedX.vars &&
+            x.rhs == expectedX.rhs &&
+            x.clash_vars == expectedX.clash_vars
+        ) {
             found = true;
             break;
         }
     }
     EXPECT_TRUE(found);
-}
-
-string print_cache(const vector<LitExtra>& c)
-{
-    std::stringstream ss;
-    for(LitExtra a: c) {
-        ss << a.getLit() << "(irred: " << a.getOnlyIrredBin() << " ), ";
-    }
-    return ss.str();
-}
-
-void check_impl_cache_contains(const Solver* s, const std::string& data)
-{
-    vector<Lit> lits = str_to_cl(data);
-    assert(lits.size() == 2);
-
-    const vector<LitExtra>& cache_lits = s->implCache[lits[0]].lits;
-    /*cout << "cache[0]: " << print_cache(s->implCache[Lit(0, false)].lits) << endl;
-    cout << "cache[1]: " << print_cache(s->implCache[Lit(1, false)].lits) << endl;
-    cout << "cache[2]: " << print_cache(s->implCache[Lit(2, false)].lits) << endl;
-
-    cout << "cache[~0]: " << print_cache(s->implCache[Lit(0, true)].lits) << endl;
-    cout << "cache[~1]: " << print_cache(s->implCache[Lit(1, true)].lits) << endl;
-    cout << "cache[~2]: " << print_cache(s->implCache[Lit(2, true)].lits) << endl;
-    */
-    bool inside = false;
-    for(LitExtra l: cache_lits) {
-        if (l.getLit() == lits[1])
-            inside = true;
-    }
-    EXPECT_TRUE(inside);
-}
-
-void add_to_cache_irred(Solver* s, const string& data)
-{
-    vector<Lit> lits = str_to_cl(data);
-    assert(lits.size() == 2);
-    assert(s->implCache.size() > lits[0].toInt());
-    assert(s->implCache.size() > lits[1].toInt());
-    s->implCache[lits[0]].lits.push_back(LitExtra(lits[1], true));
-    s->implCache[lits[1]].lits.push_back(LitExtra(lits[0], true));
-}
-
-void add_to_stamp_irred(Solver* s, const string& data)
-{
-    vector<Lit> lits = str_to_cl(data);
-    assert(lits.size() == 2);
-    assert(s->stamp.tstamp.size() > lits[0].toInt());
-    assert(s->stamp.tstamp.size() > lits[1].toInt());
-    s->stamp.tstamp[(~lits[0]).toInt()].start[STAMP_IRRED] = ++ s->stamp.stampingTime;
-    s->stamp.tstamp[(lits[1]).toInt()].start[STAMP_IRRED] = ++ s->stamp.stampingTime;
-    s->stamp.tstamp[(lits[1]).toInt()].end[STAMP_IRRED] = ++ s->stamp.stampingTime;
-    s->stamp.tstamp[(~lits[0]).toInt()].end[STAMP_IRRED] = ++ s->stamp.stampingTime;
-}
-
-void check_stamp_contains(Solver* s, const string& data, const StampType t)
-{
-    vector<Lit> lits = str_to_cl(data);
-    assert(lits.size() == 2);
-    assert(s->stamp.tstamp.size() > lits[0].toInt());
-    assert(s->stamp.tstamp.size() > lits[1].toInt());
-    uint64_t start1 = s->stamp.tstamp[(~lits[0]).toInt()].start[t];
-    uint64_t end1 = s->stamp.tstamp[(~lits[0]).toInt()].end[t];
-    uint64_t start2 = s->stamp.tstamp[lits[1].toInt()].start[t];
-    uint64_t end2 = s->stamp.tstamp[lits[1].toInt()].end[t];
-    /*cout
-    << "start1: " << start1
-    << "end1: " << end1
-    << "start2: " << start2
-    << "end2: " << end2
-    << endl;*/
-
-    EXPECT_TRUE(start1 < start2);
-    EXPECT_TRUE(end1 > end2);
 }
 
 void check_zero_assigned_lits_eq(Solver* s, const string& data)

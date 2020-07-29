@@ -51,33 +51,6 @@ void MainCommon::handle_drat_option()
             dratf = dratfTmp;
         }
     }
-
-    if (!conf.otfHyperbin) {
-        if (conf.verbosity) {
-            cout
-            << "c OTF hyper-bin is needed for BProp in DRAT, turning it back"
-            << endl;
-        }
-        conf.otfHyperbin = true;
-    }
-
-    if (conf.doFindXors) {
-        if (conf.verbosity) {
-            cout
-            << "c XOR manipulation is not supported in DRAT, turning it off"
-            << endl;
-        }
-        conf.doFindXors = false;
-    }
-
-    if (conf.doCompHandler) {
-        if (conf.verbosity) {
-            cout
-            << "c Component finding & solving is not supported during DRAT, turning it off"
-            << endl;
-        }
-        conf.doCompHandler = false;
-    }
 }
 
 uint32_t MainCommon::print_model(CMSat::SATSolver* solver, std::ostream* os, std::vector<uint32_t>* only)

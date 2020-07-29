@@ -25,8 +25,11 @@ THE SOFTWARE.
 
 using namespace CMSat;
 
-HyperEngine::HyperEngine(const SolverConf *_conf, std::atomic<bool>* _must_interrupt_inter) :
-    PropEngine(_conf, _must_interrupt_inter)
+HyperEngine::HyperEngine(
+    const SolverConf *_conf
+    , Solver* _solver
+    , std::atomic<bool>* _must_interrupt_inter) :
+    PropEngine(_conf, _solver, _must_interrupt_inter)
 {
 }
 
@@ -163,360 +166,6 @@ Lit HyperEngine::propagate_bfs(const uint64_t timeout)
     return lit_Undef;
 }
 
-Lit HyperEngine::prop_red_bin_dfs(
-    const StampType stampType
-    , PropBy& confl
-    , Lit& root
-    , bool& restart
-) {
-    propStats.bogoProps += 1;
-
-    const Lit p = toPropRedBin.top();
-    watch_subarray_const ws = watches[~p];
-    size_t done = 0;
-    for(const Watched *k = ws.begin(), *end = ws.end()
-        ; k != end
-        ; k++, done++
-    ) {
-        propStats.bogoProps += 1;
-
-        //If something other than redundant binary, skip
-        if (!k->isBin() || !k->red())
-            continue;
-
-        PropResult ret = prop_bin_with_ancestor_info(p, k, confl);
-        switch(ret) {
-            case PROP_FAIL:
-                close_all_timestamps(stampType);
-                return analyzeFail(confl);
-
-            case PROP_SOMETHING:
-                propStats.bogoProps += 8;
-                stamp.stampingTime++;
-                stamp.tstamp[trail.back().lit.toInt()].start[stampType] = stamp.stampingTime;
-
-                //Root for literals propagated afterwards will be this literal
-                root = trail.back().lit;
-
-                #ifdef DEBUG_STAMPING
-                cout
-                << "From " << p << " enqueued " << trail.back()
-                << " for stamp.stampingTime " << stamp.stampingTime
-                << endl;
-                #endif
-
-                toPropNorm.push(trail.back().lit);
-                toPropBin.push(trail.back().lit);
-                toPropRedBin.push(trail.back().lit);
-                propStats.bogoProps += done*4;
-                restart = true;
-                return lit_Undef;
-
-            case PROP_NOTHING:
-                break;
-
-            default:
-                assert(false);
-                break;
-        }
-    }
-
-    //Finished with this literal of this type
-    propStats.bogoProps += ws.size()*4;
-    toPropRedBin.pop();
-
-    return lit_Undef;
-}
-
-Lit HyperEngine::prop_irred_bin_dfs(
-    StampType stampType
-    , PropBy& confl
-    , const Lit //root
-    , bool& restart
-) {
-    const Lit p = toPropBin.top();
-    watch_subarray_const ws = watches[~p];
-    size_t done = 0;
-    for(const Watched *k = ws.begin(), *end = ws.end()
-        ; k != end
-        ; k++, done++
-    ) {
-        propStats.bogoProps += 1;
-        //Pre-fetch long clause
-        if (k->isClause()) {
-            if (value(k->getBlockedLit()) != l_True) {
-                const ClOffset offset = k->get_offset();
-                __builtin_prefetch(cl_alloc.ptr(offset));
-            }
-
-            continue;
-        } //end CLAUSE
-
-        //If something other than binary, skip
-        if (!k->isBin())
-            continue;
-
-        //If stamping only irred, go over red binaries
-        if (stampType == STAMP_IRRED
-            && k->red()
-        ) {
-            continue;
-        }
-
-        PropResult ret = prop_bin_with_ancestor_info(p, k, confl);
-        switch(ret) {
-            case PROP_FAIL:
-                close_all_timestamps(stampType);
-                return analyzeFail(confl);
-
-            case PROP_SOMETHING:
-                propStats.bogoProps += 8;
-                stamp.stampingTime++;
-                stamp.tstamp[trail.back().lit.toInt()].start[stampType] = stamp.stampingTime;
-                #ifdef DEBUG_STAMPING
-                cout
-                << "From " << p << " enqueued " << trail.back()
-                << " for stamp.stampingTime " << stamp.stampingTime
-                << endl;
-                #endif
-
-                toPropNorm.push(trail.back().lit);
-                toPropBin.push(trail.back().lit);
-                if (stampType == STAMP_IRRED) toPropRedBin.push(trail.back().lit);
-                propStats.bogoProps += done*4;
-                restart = true;
-                return lit_Undef;
-
-            case PROP_NOTHING:
-                break;
-            default:
-                assert(false);
-                break;
-        }
-    }
-
-    //Finished with this literal
-    propStats.bogoProps += ws.size()*4;
-    toPropBin.pop();
-    stamp.stampingTime++;
-    stamp.tstamp[p.toInt()].end[stampType] = stamp.stampingTime;
-    #ifdef DEBUG_STAMPING
-    cout
-    << "End time for " << p
-    << " is " << stamp.stampingTime
-    << endl;
-    #endif
-
-    return lit_Undef;
-}
-
-Lit HyperEngine::prop_larger_than_bin_cl_dfs(
-    StampType stampType
-    , PropBy& confl
-    , Lit& root
-    , bool& restart
-) {
-    PropResult ret = PROP_NOTHING;
-    const Lit p = toPropNorm.top();
-    watch_subarray ws = watches[~p];
-    propStats.bogoProps += 1;
-
-    Watched* i = ws.begin();
-    Watched* j = ws.begin();
-    Watched* end = ws.end();
-    for(; i != end; i++) {
-        propStats.bogoProps += 1;
-        if (i->isBin()) {
-            *j++ = *i;
-            continue;
-        }
-
-        if (i->isClause()) {
-            ret = prop_normal_cl_with_ancestor_info(i, j, p, confl);
-            if (ret == PROP_SOMETHING || ret == PROP_FAIL) {
-                i++;
-                break;
-            } else {
-                assert(ret == PROP_NOTHING);
-                continue;
-            }
-        }
-    }
-    while(i != end)
-        *j++ = *i++;
-    ws.shrink_(end-j);
-
-    switch(ret) {
-        case PROP_FAIL:
-            close_all_timestamps(stampType);
-            return analyzeFail(confl);
-
-        case PROP_SOMETHING:
-            propStats.bogoProps += 8;
-            stamp.stampingTime++;
-            #ifdef DEBUG_STAMPING
-            cout
-            << "From (long-reduced) " << p << " enqueued << " << trail.back()
-            << " for stamp.stampingTime " << stamp.stampingTime
-            << endl;
-            #endif
-            stamp.tstamp[trail.back().lit.toInt()].start[stampType] = stamp.stampingTime;
-            if (stampType == STAMP_IRRED) {
-                //Root for literals propagated afterwards will be this literal
-                root = trail.back().lit;
-                toPropRedBin.push(trail.back().lit);
-            }
-
-            toPropNorm.push(trail.back().lit);
-            toPropBin.push(trail.back().lit);
-            propStats.bogoProps += ws.size()*8;
-            restart = true;
-            return lit_Undef;
-
-        case PROP_NOTHING:
-            break;
-
-        default:
-            assert(false);
-            break;
-    }
-
-    //Finished with this literal
-    propStats.bogoProps += ws.size()*8;
-    toPropNorm.pop();
-
-    return lit_Undef;
-}
-
-bool HyperEngine::need_early_abort_dfs(
-    StampType stampType
-    , const size_t timeout
-) {
-    //Early-abort if too much time was used (from prober)
-    if (propStats.otfHyperTime + propStats.bogoProps > timeout) {
-        close_all_timestamps(stampType);
-        timedOutPropagateFull = true;
-        return true;
-    }
-    return false;
-}
-
-Lit HyperEngine::propagate_dfs(
-    const StampType stampType
-    , const uint64_t timeout
-) {
-    timedOutPropagateFull = false;
-    propStats.otfHyperPropCalled++;
-    #ifdef VERBOSE_DEBUG_FULLPROP
-    cout << "Prop full started" << endl;
-    #endif
-
-    PropBy confl;
-
-    //Assert startup: only 1 enqueued, uselessBin is empty
-    assert(uselessBin.empty());
-    assert(decisionLevel() == 1);
-
-    //The toplevel decision has to be set specifically
-    //If we came here as part of a backtrack to decision level 1, then
-    //this is already set, and there is no need to set it
-    if (trail.size() - trail_lim.back() == 1) {
-        //Set up root node
-        Lit root = trail[qhead].lit;
-        varData[root.var()].reason = PropBy(~lit_Undef, false, false, false);
-    }
-
-    //Set up stacks
-    toPropBin.clear();
-    toPropRedBin.clear();
-    toPropNorm.clear();
-
-    Lit root = trail.back().lit;
-    toPropBin.push(root);
-    toPropNorm.push(root);
-    if (stampType == STAMP_RED)
-        toPropRedBin.push(root);
-
-    //Setup
-    needToAddBinClause.clear();
-    stamp.stampingTime++;
-    stamp.tstamp[root.toInt()].start[stampType] = stamp.stampingTime;
-
-    #ifdef DEBUG_STAMPING
-    cout
-    << "Top-enqueued << " << trail.back()
-    << " for stamp.stampingTime " << stamp.stampingTime
-    << endl;
-    #endif
-
-    while(true) {
-        propStats.bogoProps += 3;
-        if (need_early_abort_dfs(stampType, timeout))
-            return lit_Undef;
-
-        //Propagate binary irred
-        bool restart = false;
-        while (!toPropBin.empty()) {
-            Lit ret = prop_irred_bin_dfs(stampType, confl, root, restart);
-            if (ret != lit_Undef)
-                return ret;
-            if (restart)
-                break;
-        }
-        if (restart)
-            continue;
-
-        if (stampType == STAMP_IRRED) {
-            while (!toPropRedBin.empty()) {
-                Lit ret = prop_red_bin_dfs(stampType, confl, root, restart);
-                if (ret != lit_Undef)
-                    return ret;
-                if (restart)
-                    break;
-            }
-        }
-        if (restart)
-            continue;
-
-        while (!toPropNorm.empty()) {
-            Lit ret = prop_larger_than_bin_cl_dfs(stampType, confl, root, restart);
-            if (ret != lit_Undef)
-                return ret;
-            if (restart)
-                break;
-
-            qhead++;
-        }
-        if (restart)
-            continue;
-
-        //Nothing more to propagate
-        break;
-    }
-
-    return lit_Undef;
-}
-
-
-void HyperEngine::close_all_timestamps(const StampType stampType)
-{
-    while(!toPropBin.empty())
-    {
-        stamp.stampingTime++;
-        stamp.tstamp[toPropBin.top().toInt()].end[stampType] = stamp.stampingTime;
-        #ifdef DEBUG_STAMPING
-        cout
-        << "End time for " << toPropBin.top()
-        << " is " << stamp.stampingTime
-        << " (due to failure, closing all nodes)"
-        << endl;
-        #endif
-
-        toPropBin.pop();
-    }
-}
-
-
 //Add binary clause to deepest common ancestor
 void HyperEngine::add_hyper_bin(const Lit p)
 {
@@ -531,11 +180,12 @@ void HyperEngine::add_hyper_bin(const Lit p)
         cout << "Adding hyper-bin clause: " << p << " , " << ~deepestAncestor << endl;
         #endif
         needToAddBinClause.insert(BinaryClause(p, ~deepestAncestor, true));
-        *drat << add
+        *drat << add << p << (~deepestAncestor)
         #ifdef STATS_NEEDED
-        << clauseID++ << sumConflicts
+        << 0
+        << sumConflicts
         #endif
-        << p << (~deepestAncestor) << fin;
+        << fin;
 
         hyperBinNotAdded = false;
     } else {
@@ -791,6 +441,9 @@ Lit HyperEngine::analyzeFail(const PropBy propBy)
             break;
         }
 
+#ifdef USE_GAUSS
+        case xor_t:
+#endif
         case null_clause_t:
             assert(false);
             break;
@@ -916,13 +569,6 @@ PropResult HyperEngine::prop_bin_with_ancestor_info(
     const Lit lit = k->lit2();
     const lbool val = value(lit);
     if (val == l_Undef) {
-        #ifdef STATS_NEEDED
-        if (k->red())
-            propStats.propsBinRed++;
-        else
-            propStats.propsBinIrred++;
-        #endif
-
         //Never propagated before
         enqueue_with_acestor_info(lit, p, k->red());
         return PROP_SOMETHING;
@@ -997,9 +643,6 @@ PropResult HyperEngine::prop_normal_cl_with_ancestor_info(
     propStats.bogoProps += 4;
     const ClOffset offset = i->get_offset();
     Clause& c = *cl_alloc.ptr(offset);
-    #ifdef STATS_NEEDED
-    c.stats.clause_looked_at++;
-    #endif
 
     PropResult ret = prop_normal_helper(c, offset, j, p);
     if (ret != PROP_TODO)
@@ -1011,15 +654,6 @@ PropResult HyperEngine::prop_normal_cl_with_ancestor_info(
         return handle_normal_prop_fail(c, offset, confl);
     }
 
-    //Update stats
-    #ifdef STATS_NEEDED
-    c.stats.propagations_made++;
-    if (c.red())
-        propStats.propsLongRed++;
-    else
-        propStats.propsLongIrred++;
-    #endif
-
     add_hyper_bin(c[0], c);
 
     return PROP_SOMETHING;
@@ -1029,32 +663,10 @@ size_t HyperEngine::mem_used() const
 {
     size_t mem = 0;
     mem += PropEngine::mem_used();
-    mem += toPropNorm.capacity()*sizeof(Lit);
-    mem += toPropBin.capacity()*sizeof(Lit);
-    mem += toPropRedBin.capacity()*sizeof(Lit);
     mem += currAncestors.capacity()*sizeof(Lit);
 
     return mem;
 }
-
-size_t HyperEngine::mem_used_stamp() const
-{
-    return stamp.mem_used();
-}
-
-size_t HyperEngine::print_stamp_mem(size_t totalMem) const
-{
-    const size_t mem = mem_used_stamp();
-    print_stats_line("c Mem for stamps"
-        , mem/(1024UL*1024UL)
-        , "MB"
-        , stats_line_percent(mem, totalMem)
-        , "%"
-    );
-
-    return mem;
-}
-
 
 void HyperEngine::enqueue_with_acestor_info(
     const Lit p

@@ -45,13 +45,21 @@ using std::cout;
 using std::endl;
 using std::string;
 
-enum class gret{confl, unit_confl, prop, unit_prop, nothing, nothing_fnewwatch};
+enum class gret      {confl, prop, nothing_satisfied, nothing_fnewwatch};
+enum class gauss_res {none, confl, prop};
+enum class branch {
+    vsids,
+    maple
+#ifdef VMTF_NEEDED
+    ,vmtf
+#endif
+};
 
 inline std::string restart_type_to_string(const Restart type)
 {
     switch(type) {
         case Restart::glue:
-            return "glue-based";
+            return "glue";
 
         case Restart::geom:
             return "geometric";
@@ -60,10 +68,10 @@ inline std::string restart_type_to_string(const Restart type)
             return "luby";
 
         case Restart::glue_geom:
-            return "switch-glue-geom";
+            return "glue-geom";
 
         case Restart::never:
-            return "never restart";
+            return "never";
     }
 
     assert(false && "oops, one of the restart types has no string name");
@@ -71,28 +79,68 @@ inline std::string restart_type_to_string(const Restart type)
     return "Ooops, undefined!";
 }
 
-inline std::string restart_type_to_short_string(const Restart type)
+inline std::string branch_type_to_string(const branch type)
+{
+    switch(type) {
+        case branch::vsids:
+            return "vsid";
+
+        case branch::maple:
+            return "mapl";
+
+        #ifdef VMTF_NEEDED
+        case branch::vmtf:
+            return "vmtf";
+        #endif
+    }
+
+    assert(false && "oops, one of the branch types has no string name");
+
+    return "Ooops, undefined!";
+}
+
+inline int branch_type_to_int(const branch type)
+{
+    switch(type) {
+        case branch::vsids:
+            return 0;
+
+        case branch::maple:
+            return 1;
+
+        #ifdef VMTF_NEEDED
+        case branch::vmtf:
+            return 2;
+        #endif
+    }
+
+    assert(false && "oops, one of the branch types has no int name");
+
+    return 0;
+}
+
+inline int restart_type_to_int(const Restart type)
 {
     switch(type) {
         case Restart::glue:
-            return "glue";
+            return 1;
 
         case Restart::geom:
-            return "geom";
+            return 2;
 
         case Restart::luby:
-            return "luby";
+            return 3;
 
         case Restart::glue_geom:
-            return "gl/geo";
+            return 4;
 
         case Restart::never:
-            return "never";
+            return 6;
     }
 
         assert(false && "oops, one of the restart types has no string name");
 
-        return "ERR: undefined!";
+        return 0;
 }
 
 //Removed by which algorithm. NONE = not eliminated
@@ -101,6 +149,7 @@ enum class Removed : unsigned char {
     , elimed
     , replaced
     , decomposed
+    , clashed
 };
 
 inline std::string removed_type_to_string(const Removed removed) {
@@ -116,6 +165,9 @@ inline std::string removed_type_to_string(const Removed removed) {
 
         case Removed::decomposed:
             return "decomposed into another component";
+
+        case Removed::clashed:
+            return "clashed on XOR and temporarily removed";
     }
 
     assert(false && "oops, one of the elim types has no string name");
@@ -194,15 +246,27 @@ inline double stats_line_percent(double num, double total)
     }
 }
 
-inline void print_value_kilo_mega(const int64_t value)
+inline string print_value_kilo_mega(const int64_t value, bool setw = true)
 {
+    std::stringstream ss;
     if (value > 20*1000LL*1000LL) {
-        cout << " " << std::setw(4) << value/(1000LL*1000LL) << "M";
+        if (setw) {
+            ss << std::setw(4);
+        }
+        ss << value/(1000LL*1000LL) << "M";
     } else if (value > 20LL*1000LL) {
-        cout << " " << std::setw(4) << value/1000LL << "K";
+        if (setw) {
+            ss << std::setw(4);
+        }
+        ss << value/1000LL << "K";
     } else {
-        cout << " " << std::setw(5) << value;
+        if (setw) {
+            ss << std::setw(5);
+        }
+        ss << value;
     }
+
+    return ss.str();
 }
 
 template<class T, class T2> void print_stats_line(
@@ -265,6 +329,24 @@ template<class T> void print_stats_line(
     << std::right
     << endl;
 }
+
+struct ActAndOffset {
+    double act = 0;
+    double offset = 1.0;
+    double combine() const {
+        return act*offset;
+    }
+    void add_in(const ActAndOffset& other) {
+        act += other.act;
+        offset = std::max(offset, other.offset);
+    }
+    std::string str() const {
+        std::string ret;
+        std::stringstream ss;
+        ss << act << "*" << offset;
+        return ret;
+    }
+};
 
 struct AssignStats
 {
@@ -447,10 +529,12 @@ struct ConflStats
 
     ConflStats& operator+=(const ConflStats& other)
     {
+        #ifdef STATS_NEEDED
         conflsBinIrred += other.conflsBinIrred;
         conflsBinRed += other.conflsBinRed;
         conflsLongIrred += other.conflsLongIrred;
         conflsLongRed += other.conflsLongRed;
+        #endif
 
         numConflicts += other.numConflicts;
 
@@ -459,16 +543,19 @@ struct ConflStats
 
     ConflStats& operator-=(const ConflStats& other)
     {
+        #ifdef STATS_NEEDED
         conflsBinIrred -= other.conflsBinIrred;
         conflsBinRed -= other.conflsBinRed;
         conflsLongIrred -= other.conflsLongIrred;
         conflsLongRed -= other.conflsLongRed;
+        #endif
 
         numConflicts -= other.numConflicts;
 
         return *this;
     }
 
+    #ifdef STATS_NEEDED
     void update(const ConflCausedBy lastConflictCausedBy)
     {
         switch(lastConflictCausedBy) {
@@ -488,6 +575,7 @@ struct ConflStats
                 assert(false);
         }
     }
+    #endif
 
     void print_short(double cpu_time, bool do_print_times) const
     {
@@ -508,6 +596,7 @@ struct ConflStats
         cout << "c CONFLS stats" << endl;
         print_short(cpu_time, do_print_times);
 
+        #ifdef STATS_NEEDED
         print_stats_line("c conflsBinIrred", conflsBinIrred
             , stats_line_percent(conflsBinIrred, numConflicts)
             , "%"
@@ -546,12 +635,15 @@ struct ConflStats
 
             //assert(diff == 0);
         }
+        #endif
     }
 
+    #ifdef STATS_NEEDED
     uint64_t conflsBinIrred = 0;
     uint64_t conflsBinRed = 0;
     uint64_t conflsLongIrred = 0;
     uint64_t conflsLongRed = 0;
+    #endif
 
     ///Number of conflicts
     uint64_t  numConflicts = 0;
@@ -603,5 +695,19 @@ inline double float_div(const double a, const double b)
 }
 
 } //end namespace
+
+namespace std {
+
+  template <>
+  struct hash<CMSat::Lit>
+  {
+    std::size_t operator()(const CMSat::Lit& k) const
+    {
+      return k.toInt();
+    }
+  };
+
+}
+
 
 #endif //SOLVERTYPES_H

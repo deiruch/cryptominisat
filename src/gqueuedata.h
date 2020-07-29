@@ -27,46 +27,23 @@ namespace CMSat {
 
 struct GaussQData {
     bool do_eliminate; // we do elimination when basic variable is invoked
-    uint32_t e_var;                     // do elimination variable
-    uint32_t e_row_n ;         // do elimination row
-    PropBy confl;              // for choosing better conflict
-    uint32_t conflict_size_gauss; // for choosing better conflict
-
-    ///ret_gauss = 0; // gaussian matrix is long conflict
-    ///ret_gauss = 1; // gaussian matrix is unit conflict clause
-    ///ret_gauss = 2; // gaussian matrix is long propagation
-    ///ret_gauss = 3; // gaussian matrix is unit propagation
-    int ret_gauss;    // gauss matrix result
+    uint32_t new_resp_var;                     // do elimination variable
+    uint32_t new_resp_row ;         // do elimination row
+    PropBy confl;              // returning conflict
+    gauss_res ret; //final return value to Searcher
+    uint32_t currLevel; //level at which the variable was decided on
 
 
-    bool xorEqualFalse_gauss;            // conflict xor clause xorEqualFalse
-    vector<Lit> conflict_clause_gauss; // for gaussian elimination better conflict
-
-
-    uint32_t big_gaussnum;   // total gauss time for DPLL
-    uint32_t big_propagate;  // total gauss propogation time for DPLL
-    uint32_t big_conflict;   // total gauss conflict    time for DPLL
-    bool engaus_disable;     // decide to do gaussian elimination
-    bool enter_matrix;
+    uint32_t num_props = 0;  // total gauss propogation time for DPLL
+    uint32_t num_conflicts = 0;   // total gauss conflict    time for DPLL
+    uint32_t engaus_disable_checks = 0;
+    bool engaus_disable = false;     // decide to do gaussian elimination
 
     void reset()
     {
-        enter_matrix = false;
         do_eliminate = false;
-        conflict_clause_gauss.clear();
-        xorEqualFalse_gauss = false;
-        ret_gauss = 4;
-        conflict_size_gauss = std::numeric_limits<uint32_t>::max();
+        ret = gauss_res::none;
     }
-
-    void reset_stats()
-    {
-        big_gaussnum = 0;   // total gauss time for DPLL
-        big_propagate = 0;  // total gauss propogation time for DPLL
-        big_conflict = 0;   // total gauss conflict    time for DPLL
-        engaus_disable = 0;     // decide to do gaussian elimination
-    }
-
 };
 
 }

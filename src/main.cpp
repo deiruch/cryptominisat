@@ -29,6 +29,8 @@ THE SOFTWARE.
 #include <fenv.h>
 #endif
 
+#define DEBUG_DIMACSPARSER_CMS
+
 #include <ctime>
 #include <cstring>
 #include <errno.h>
@@ -60,7 +62,6 @@ using std::cout;
 using std::cerr;
 using std::endl;
 using boost::lexical_cast;
-using std::list;
 using std::map;
 
 struct WrongParam
@@ -84,16 +85,6 @@ struct WrongParam
     string msg;
 };
 
-bool fileExists(const string& filename)
-{
-    struct stat buf;
-    if (stat(filename.c_str(), &buf) != -1)
-    {
-        return true;
-    }
-    return false;
-}
-
 
 Main::Main(int _argc, char** _argv) :
     argc(_argc)
@@ -110,10 +101,10 @@ void Main::readInAFile(SATSolver* solver2, const string& filename)
     }
     #ifndef USE_ZLIB
     FILE * in = fopen(filename.c_str(), "rb");
-    DimacsParser<StreamBuffer<FILE*, FN> > parser(solver2, &debugLib, conf.verbosity);
+    DimacsParser<StreamBuffer<FILE*, FN>, SATSolver> parser(solver2, &debugLib, conf.verbosity);
     #else
     gzFile in = gzopen(filename.c_str(), "rb");
-    DimacsParser<StreamBuffer<gzFile, GZ> > parser(solver2, &debugLib, conf.verbosity);
+    DimacsParser<StreamBuffer<gzFile, GZ>, SATSolver> parser(solver2, &debugLib, conf.verbosity);
     #endif
 
     if (in == NULL) {
@@ -175,6 +166,7 @@ void Main::readInAFile(SATSolver* solver2, const string& filename)
             cout << endl;
         }
     }
+
     call_after_parse();
 
     #ifndef USE_ZLIB
@@ -204,9 +196,9 @@ void Main::readInStandardInput(SATSolver* solver2)
     }
 
     #ifndef USE_ZLIB
-    DimacsParser<StreamBuffer<FILE*, FN> > parser(solver2, &debugLib, conf.verbosity);
+    DimacsParser<StreamBuffer<FILE*, FN>, SATSolver> parser(solver2, &debugLib, conf.verbosity);
     #else
-    DimacsParser<StreamBuffer<gzFile, GZ> > parser(solver2, &debugLib, conf.verbosity);
+    DimacsParser<StreamBuffer<gzFile, GZ>, SATSolver> parser(solver2, &debugLib, conf.verbosity);
     #endif
 
     if (!parser.parse_DIMACS(in, false)) {
@@ -279,6 +271,11 @@ void Main::printResultFunc(
     } else {
         *os << "s INDETERMINATE" << endl;
     }
+    if (ret == l_True && !printResult && !toFile)
+    {
+        cout << "c Not printing satisfying assignment. "
+        "Use the '--printsol 1' option for that" << endl;
+    }
 
     if (ret == l_True && (printResult || toFile)) {
         if (toFile) {
@@ -313,6 +310,7 @@ void Main::printResultFunc(
     }
 }
 
+/* clang-format off */
 void Main::add_supported_options()
 {
     // Declare the supported options.
@@ -330,28 +328,54 @@ void Main::add_supported_options()
         "Stop solving after this much time (s)")
     ("maxconfl", po::value(&maxconfl),
         "Stop solving after this many conflicts")
-//     ("undef", po::value(&conf.greedy_undef)->default_value(conf.greedy_undef)
-//         , "Set as many variables in solution to UNDEF as possible if solution is SAT")
     ("mult,m", po::value(&conf.orig_global_timeout_multiplier)->default_value(conf.orig_global_timeout_multiplier)
         , "Time multiplier for all simplification cutoffs")
     ("memoutmult", po::value(&conf.var_and_mem_out_mult)->default_value(conf.var_and_mem_out_mult)
-        , "Multiplier for memory-out checks on variables and clause-link-in, etc. Useful when you have limited memory.")
+        , "Multiplier for memory-out checks on inprocessing functions. It limits things such as clause-link-in. Useful when you have limited memory but still want to do some inprocessing")
     ("preproc,p", po::value(&conf.preprocess)->default_value(conf.preprocess)
         , "0 = normal run, 1 = preprocess and dump, 2 = read back dump and solution to produce final solution")
-    ("polar", po::value<string>()->default_value("auto")
-        , "{true,false,rnd,auto} Selects polarity mode. 'true' -> selects only positive polarity when branching. 'false' -> selects only negative polarity when branching. 'auto' -> selects last polarity used (also called 'caching')")
-    ("chronophase", po::value(&conf.chronophase)->default_value(conf.chronophase)
-        , "Phase to choose during chrono BT. 0 = default, 1 = lsids")
     #ifdef STATS_NEEDED
     ("clid", po::bool_switch(&clause_ID_needed)
         , "Add clause IDs to DRAT output")
     #endif
-    //("greedyunbound", po::bool_switch(&conf.greedyUnbound)
-    //    , "Greedily unbound variables that are not needed for SAT")
     ;
 
-    std::ostringstream s_blocking_multip;
-    s_blocking_multip << std::setprecision(4) << conf.blocking_restart_multip;
+    #ifdef FINAL_PREDICTOR
+    po::options_description predictOptions("Predict options");
+    predictOptions.add_options()
+    ("predshort", po::value(&conf.pred_conf_short)->default_value(conf.pred_conf_short)
+        , "Predictor SHORT config to use")
+    ("predlong", po::value(&conf.pred_conf_long)->default_value(conf.pred_conf_long)
+        , "Predictor LONG config to use")
+    ("predforever", po::value(&conf.pred_conf_forever)->default_value(conf.pred_conf_forever)
+        , "Predictor FOREVER config to use")
+    ("predshortmult", po::value(&conf.pred_short_size_mult)->default_value(conf.pred_short_size_mult)
+        , "Pred short multiplier")
+    ("predlongmult", po::value(&conf.pred_long_size_mult)->default_value(conf.pred_long_size_mult)
+        , "Pred long multiplier")
+    ("predforevermult", po::value(&conf.pred_forever_size_mult)->default_value(conf.pred_forever_size_mult)
+        , "Pred forever multiplier")
+    ("predlongchunkmult", po::value(&conf.pred_long_chunk_mult)->default_value(conf.pred_long_chunk_mult)
+        , "Pred long chunk multiplier")
+    ("predforeverchunkmult", po::value(&conf.pred_forever_chunk_mult)->default_value(conf.pred_forever_chunk_mult)
+        , "Pred forever chunk multiplier")
+    ;
+    #endif
+
+    po::options_description polar_options("Polarity options");
+    polar_options.add_options()
+    ("polar", po::value<string>()->default_value("auto")
+        , "{true,false,rnd,auto} Selects polarity mode. 'true' -> selects only positive polarity when branching. 'false' -> selects only negative polarity when branching. 'auto' -> selects last polarity used (also called 'caching')")
+    ("polarstablen", po::value(&conf.polar_stable_every_n)->default_value(conf.polar_stable_every_n)
+        , "When to use stable polarities. 0 = always, otherwise every n. Negative is special, see code")
+    ("lucky", po::value(&conf.do_lucky_polar_every_n)->default_value(conf.do_lucky_polar_every_n)
+        , "Try computing lucky polarities")
+    ("polarbestinvmult", po::value(&conf.polar_best_inv_multip_n)->default_value(conf.polar_best_inv_multip_n)
+        , "How often should we use inverted best polarities instead of stable")
+    ("polarbestmult", po::value(&conf.polar_best_multip_n)->default_value(conf.polar_best_multip_n)
+        , "How often should we use best polarities instead of stable")
+    ;
+
 
     std::ostringstream s_local_glue_multiplier;
     s_local_glue_multiplier << std::setprecision(4) << conf.local_glue_multiplier;
@@ -362,12 +386,6 @@ void Main::add_supported_options()
         , "{geom, glue, luby}  Restart strategy to follow.")
     ("gluehist", po::value(&conf.shortTermHistorySize)->default_value(conf.shortTermHistorySize)
         , "The size of the moving window for short-term glue history of redundant clauses. If higher, the minimal number of conflicts between restarts is longer")
-    ("blkrest", po::value(&conf.do_blocking_restart)->default_value(conf.do_blocking_restart)
-        , "Perform blocking restarts as per Glucose 3.0")
-    ("blkrestlen", po::value(&conf.blocking_restart_trail_hist_length)->default_value(conf.blocking_restart_trail_hist_length)
-        , "Length of the long term trail size for blocking restart")
-    ("blkrestmultip", po::value(&conf.blocking_restart_multip)->default_value(conf.blocking_restart_multip, s_blocking_multip.str())
-        , "Multiplier used for blocking restart cut-off (called 'R' in Glucose 3.0)")
     ("lwrbndblkrest", po::value(&conf.lower_bound_for_blocking_restart)->default_value(conf.lower_bound_for_blocking_restart)
         , "Lower bound on blocking restart -- don't block before this many conflicts")
     ("locgmult" , po::value(&conf.local_glue_multiplier)->default_value(conf.local_glue_multiplier, s_local_glue_multiplier.str())
@@ -393,6 +411,10 @@ void Main::add_supported_options()
         , "Reduce lev1 clauses every N")
     ("everylev2", po::value(&conf.every_lev2_reduce)->default_value(conf.every_lev2_reduce)
         , "Reduce lev2 clauses every N")
+    #if defined(FINAL_PREDICTOR) || defined(STATS_NEEDED)
+    ("everylev4", po::value(&conf.every_lev3_reduce)->default_value(conf.every_lev3_reduce)
+        , "Reduce final predictor (lev3) clauses every N, and produce data at every N in case of STATS_NEEDED")
+    #endif
     ("lev1usewithin", po::value(&conf.must_touch_lev1_within)->default_value(conf.must_touch_lev1_within)
         , "Learnt clause must be used in lev1 within this timeframe or be dropped to lev2")
     ;
@@ -407,43 +429,11 @@ void Main::add_supported_options()
         , "When dumping redundant clauses, only dump clauses with at most this large glue")
     ;
 
-    std::ostringstream s_random_var_freq;
-    s_random_var_freq << std::setprecision(5) << conf.random_var_freq;
-
-    std::ostringstream s_var_decay_vsids_start;
-    s_var_decay_vsids_start << std::setprecision(5) << conf.var_decay_vsids_start;
-
-    std::ostringstream s_var_decay_vsids_max;
-    s_var_decay_vsids_max << std::setprecision(5) << conf.var_decay_vsids_max;
-
     po::options_description varPickOptions("Variable branching options");
     varPickOptions.add_options()
-    ("vardecaystart", po::value(&conf.var_decay_vsids_start)->default_value(conf.var_decay_vsids_start, s_var_decay_vsids_start.str())
-        , "variable activity increase divider (MUST be smaller than multiplier)")
-    ("vardecaymax", po::value(&conf.var_decay_vsids_max)->default_value(conf.var_decay_vsids_max, s_var_decay_vsids_max.str())
-        , "variable activity increase divider (MUST be smaller than multiplier)")
-    ("vincstart", po::value(&conf.var_inc_vsids_start)->default_value(conf.var_inc_vsids_start)
-        , "variable activity increase starts with this value. Make sure that this multiplied by multiplier and divided by divider is larger than itself")
-    ("vsidsalternate", po::value(&conf.alternate_vsids)->default_value(conf.alternate_vsids)
-         , "Alternate VSIDS values between iterations")
-    ("vsidsalterval1", po::value(&conf.alternate_vsids_decay_rate1)->default_value(conf.alternate_vsids_decay_rate1)
-         , "Alternate value 1 of VSIDS decay rate -- active when alternation is ON")
-    ("vsidsalterval2", po::value(&conf.alternate_vsids_decay_rate2)->default_value(conf.alternate_vsids_decay_rate2)
-        , "Alternate value 2 of VSIDS decay rate -- active when alternation is ON")
-    ("freq", po::value(&conf.random_var_freq)->default_value(conf.random_var_freq, s_random_var_freq.str())
-        , "[0 - 1] freq. of picking var at random")
-    ("maple", po::value(&conf.maple)->default_value(conf.maple)
-        , "Use maple-type variable picking sometimes")
-    ("maplemod", po::value(&conf.modulo_maple_iter)->default_value(conf.modulo_maple_iter)
-        , "Use maple N-1 of N rounds. Normally, N is 2, so used every other round. Set to 3 so it will use maple 2/3rds of the time.")
-    ("maplemorebump", po::value(&conf.more_maple_bump_high_glue)->default_value(conf.more_maple_bump_high_glue)
-        , "Bump variable usefulness more when glue is HIGH")
-    ("maplealternate", po::value(&conf.alternate_maple)->default_value(conf.alternate_maple)
-         , "Alternate maple values between iterations")
-    ("maplealterval1", po::value(&conf.alternate_maple_decay_rate1)->default_value(conf.alternate_maple_decay_rate1)
-         , "Alternate value 1 of maple decay rate -- active when alternation is ON")
-    ("maplealterval2", po::value(&conf.alternate_maple_decay_rate2)->default_value(conf.alternate_maple_decay_rate2)
-        , "Alternate value 2 of maple decay rate -- active when alternation is ON")
+    ("branchstr"
+        , po::value(&conf.branch_strategy_setup)->default_value(conf.branch_strategy_setup)
+        , "Branch strategy. E.g. 'vmtf+vsids+maple+rnd'")
     ;
 
 
@@ -451,8 +441,32 @@ void Main::add_supported_options()
     iterativeOptions.add_options()
     ("maxsol", po::value(&max_nr_of_solutions)->default_value(max_nr_of_solutions)
         , "Search for given amount of solutions. Thanks to Jannis Harder for the decision-based banning idea")
+    ("nobansol", po::bool_switch(&dont_ban_solutions)
+        , "Don't ban the solution once it's found")
     ("debuglib", po::value<string>(&debugLib)
-        , "MainSolver at specific 'solve()' points in CNF file")
+        , "Parse special comments to run solve/simplify during parsing of CNF")
+    ;
+
+    po::options_description breakid_options("Breakid options");
+    breakid_options.add_options()
+    ("breakid", po::value(&conf.doBreakid)->default_value(conf.doBreakid)
+        , "Run BreakID to break symmetries.")
+    ("breakideveryn", po::value(&conf.breakid_every_n)->default_value(conf.breakid_every_n)
+        , "Run BreakID every N simplification iterations")
+    ("breakidmaxlits", po::value(&conf.breakid_lits_limit_K)->default_value(conf.breakid_lits_limit_K)
+        , "Maximum number of literals in thousands. If exceeded, BreakID will not run")
+    ("breakidmaxcls", po::value(&conf.breakid_cls_limit_K)->default_value(conf.breakid_cls_limit_K)
+        , "Maximum number of clauses in thousands. If exceeded, BreakID will not run")
+    ("breakidmaxvars", po::value(&conf.breakid_vars_limit_K)->default_value(conf.breakid_vars_limit_K)
+        , "Maximum number of variables in thousands. If exceeded, BreakID will not run")
+    ("breakidtime", po::value(&conf.breakid_time_limit_K)->default_value(conf.breakid_time_limit_K)
+        , "Maximum number of steps taken during automorphism finding.")
+    ("breakidcls", po::value(&conf.breakid_max_constr_per_permut)
+        ->default_value(conf.breakid_max_constr_per_permut)
+        , "Maximum number of breaking clauses per permutation.")
+    ("breakidmatrix", po::value(&conf.breakid_matrix_detect)
+        ->default_value(conf.breakid_matrix_detect)
+        , "Detect matrix row interchangability")
     ;
 
     po::options_description sls_options("Stochastic Local Search options");
@@ -460,7 +474,7 @@ void Main::add_supported_options()
     ("sls", po::value(&conf.doSLS)->default_value(conf.doSLS)
         , "Run SLS during simplification")
     ("slstype", po::value(&conf.which_sls)->default_value(conf.which_sls)
-        , "Which SLS to run. Allowed values: walksat, yalsat, ccnr")
+        , "Which SLS to run. Allowed values: walksat, yalsat, ccnr, ccnr_yalsat")
     ("slsmaxmem", po::value(&conf.sls_memoutMB)->default_value(conf.sls_memoutMB)
         , "Maximum number of MB to give to SLS solver. Doesn't run SLS solver if the memory usage would be more than this.")
     ("slseveryn", po::value(&conf.sls_every_n)->default_value(conf.sls_every_n)
@@ -471,24 +485,28 @@ void Main::add_supported_options()
         , "Max 'runs' for WalkSAT. Limits time of WalkSAT run")
     ("slsgetphase", po::value(&conf.sls_get_phase)->default_value(conf.sls_get_phase)
         , "Get phase from SLS solver, set as new phase for CDCL")
+    ("slsccnraspire", po::value(&conf.sls_ccnr_asipire)->default_value(conf.sls_ccnr_asipire)
+        , "Turn aspiration on/off for CCANR")
     ("slstobump", po::value(&conf.sls_how_many_to_bump)->default_value(conf.sls_how_many_to_bump)
         , "How many variables to bump in CCNR")
+    ("slstobumpmaxpervar", po::value(&conf.sls_bump_var_max_n_times)->default_value(conf.sls_bump_var_max_n_times)
+        , "How many times to bump an individual variable's activity in CCNR")
+    ("slsbumptype", po::value(&conf.sls_bump_type)->default_value(conf.sls_bump_type)
+        , "How to calculate what variable to bump. 1 = clause-based, 2 = var-flip-based, 3 = var-score-based")
+    ("slsoffset", po::value(&conf.sls_set_offset)->default_value(conf.sls_set_offset)
+        , "Should SLS set the VSIDS/Maple offsetsd")
     ;
 
     po::options_description probeOptions("Probing options");
     probeOptions.add_options()
-    ("bothprop", po::value(&conf.doBothProp)->default_value(conf.doBothProp)
-        , "Do propagations solely to propagate the same value twice")
-    ("probe", po::value(&conf.doProbe)->default_value(conf.doProbe)
-        , "Carry out probing")
-    ("probemaxm", po::value(&conf.probe_bogoprops_time_limitM)->default_value(conf.probe_bogoprops_time_limitM)
-      , "Time in mega-bogoprops to perform probing")
     ("transred", po::value(&conf.doTransRed)->default_value(conf.doTransRed)
         , "Remove useless binary clauses (transitive reduction)")
     ("intree", po::value(&conf.doIntreeProbe)->default_value(conf.doIntreeProbe)
         , "Carry out intree-based probing")
     ("intreemaxm", po::value(&conf.intree_time_limitM)->default_value(conf.intree_time_limitM)
       , "Time in mega-bogoprops to perform intree probing")
+    ("otfhyper", po::value(&conf.do_hyperbin_and_transred)->default_value(conf.do_hyperbin_and_transred)
+        , "Perform hyper-binary resolution during probing")
     ;
 
     std::ostringstream ssERatio;
@@ -538,9 +556,11 @@ void Main::add_supported_options()
     ("terntimelim", po::value(&conf.ternary_res_time_limitM)->default_value(conf.ternary_res_time_limitM)
         , "Time-out in bogoprops M of ternary resolution as per paper 'Look-Ahead Versus Look-Back for Satisfiability Problems'")
     ("ternkeep", po::value(&conf.ternary_keep_mult)->default_value(conf.ternary_keep_mult, tern_keep.str())
-        , "Keep ternary clauses only if they are touched within this multiple of 'lev1usewithin'")
+        , "Keep ternary resolution clauses only if they are touched within this multiple of 'lev1usewithin'")
     ("terncreate", po::value(&conf.ternary_max_create)->default_value(conf.ternary_max_create, tern_max_create.str())
-        , "Create only this multiple (of linked in cls) ternary clauses per simp run")
+        , "Create only this multiple (of linked in cls) ternary resolution clauses per simp run")
+    ("ternbincreate", po::value(&conf.allow_ternary_bin_create)->default_value(conf.allow_ternary_bin_create, tern_max_create.str())
+        , "Allow ternary resolving to generate binary clauses")
     ;
 
     po::options_description occ_mem_limits("Occ-based simplification memory limits");
@@ -607,12 +627,18 @@ void Main::add_supported_options()
         , "Discover long XORs")
     ("maxxorsize", po::value(&conf.maxXorToFind)->default_value(conf.maxXorToFind)
         , "Maximum XOR size to find")
-    ("xorcache", po::value(&conf.useCacheWhenFindingXors)->default_value(conf.useCacheWhenFindingXors)
-        , "Use cache when finding XORs. Finds a LOT more XORs, but takes a lot more time")
+    ("xorfindtout", po::value(&conf.xor_finder_time_limitM)->default_value(conf.xor_finder_time_limitM)
+        , "Time limit for finding XORs")
     ("varsperxorcut", po::value(&conf.xor_var_per_cut)->default_value(conf.xor_var_per_cut)
         , "Number of _real_ variables per XOR when cutting them. So 2 will have XORs of size 4 because 1 = connecting to previous, 1 = connecting to next, 2 in the midde. If the XOR is 4 long, it will be just one 4-long XOR, no connectors")
     ("maxxormat", po::value(&conf.maxXORMatrix)->default_value(conf.maxXORMatrix)
         , "Maximum matrix size (=num elements) that we should try to echelonize")
+    ("forcepreservexors", po::value(&conf.force_preserve_xors)->default_value(conf.force_preserve_xors)
+        , "Force preserving XORs when they have been found. Easier to make sure XORs are not lost through simplifiactions such as strenghtening")
+#ifdef USE_M4RI
+    ("m4ri", po::value(&conf.doM4RI)->default_value(conf.doM4RI)
+        , "Use M4RI")
+#endif
     //Not implemented yet
     //("mix", po::value(&conf.doMixXorAndGates)->default_value(conf.doMixXorAndGates)
     //    , "Mix XORs and OrGates for new truths")
@@ -622,8 +648,6 @@ void Main::add_supported_options()
     eqLitOpts.add_options()
     ("scc", po::value(&conf.doFindAndReplaceEqLits)->default_value(conf.doFindAndReplaceEqLits)
         , "Find equivalent literals through SCC and replace them")
-    ("extscc", po::value(&conf.doExtendedSCC)->default_value(conf.doExtendedSCC)
-        , "Perform SCC using cache")
     ;
 
     po::options_description gateOptions("Gate-related options");
@@ -656,26 +680,18 @@ void Main::add_supported_options()
         , "Perform strong minimisation at conflict gen.")
     ("moremoreminim", po::value(&conf.doMinimRedMoreMore)->default_value(conf.doMinimRedMoreMore)
         , "Perform even stronger minimisation at conflict gen.")
-    ("moremorecachelimit", po::value(&conf.more_red_minim_limit_cache)->default_value(conf.more_red_minim_limit_cache)
-        , "Time-out in microsteps for each more minimisation with cache. Only active if 'moreminim' is on")
-    ("moremorestamp", po::value(&conf.more_more_with_stamp)->default_value(conf.more_more_with_stamp)
-        , "Use cache for otf more minim of learnt clauses")
     ("moremorealways", po::value(&conf.doAlwaysFMinim)->default_value(conf.doAlwaysFMinim)
         , "Always strong-minimise clause")
     ("decbased", po::value(&conf.do_decision_based_cl)->default_value(conf.do_decision_based_cl)
         , "Create decision-based conflict clauses when the UIP clause is too large")
-    ("decbasemaxlev", po::value(&conf.decision_based_cl_max_levels)->default_value(conf.decision_based_cl_max_levels)
-        , "Create decision-based conflict if the maximum level is below or equal to this")
-    ("decbaseminsz", po::value(&conf.decision_based_cl_min_learned_size)->default_value(conf.decision_based_cl_min_learned_size)
-        , "Create decision-based conflict if the learnt clause is larger than this")
     ;
 
-    po::options_description propOptions("Propagation options");
+    po::options_description propOptions("Glue options");
     propOptions.add_options()
     ("updateglueonanalysis", po::value(&conf.update_glues_on_analyze)->default_value(conf.update_glues_on_analyze)
         , "Update glues while analyzing")
-    ("otfhyper", po::value(&conf.otfHyperbin)->default_value(conf.otfHyperbin)
-        , "Perform hyper-binary resolution at dec. level 1 after every restart and during probing")
+    ("maxgluehistltlimited", po::value(&conf.max_glue_cutoff_gluehistltlimited)->default_value(conf.max_glue_cutoff_gluehistltlimited)
+        , "Maximum glue used by glue-based restart strategy when populating glue history.")
     ;
 
     po::options_description chrono_bt_opts("Propagation options");
@@ -684,33 +700,24 @@ void Main::add_supported_options()
         , "Difference in decision level is more than this, perform chonological backtracking instead of non-chronological backtracking. Giving -1 means it is never turned on (overrides '--confltochrono -1' in this case).")
     ;
 
-
-    po::options_description stampOptions("Stamping options");
-    stampOptions.add_options()
-    ("stamp", po::value(&conf.doStamp)->default_value(conf.doStamp)
-        , "Use time stamping as per Heule&Jarvisalo&Biere paper")
-    ("cache", po::value(&conf.doCache)->default_value(conf.doCache)
-        , "Use implication cache -- may use a lot of memory")
-    ("cachesize", po::value(&conf.maxCacheSizeMB)->default_value(conf.maxCacheSizeMB)
-        , "Maximum size of the implication cache in MB. It may temporarily reach higher usage, but will be deleted&disabled if this limit is reached.")
-    ("cachecutoff", po::value(&conf.cacheUpdateCutoff)->default_value(conf.cacheUpdateCutoff)
-        , "If the number of literals propagated by a literal is more than this, it's not included into the implication cache")
-    ;
-
     po::options_description sqlOptions("SQL options");
     sqlOptions.add_options()
     ("sql", po::value(&sql)->default_value(0)
         , "Write to SQL. 0 = no SQL, 1 or 2 = sqlite")
     ("sqlitedb", po::value(&sqlite_filename)
         , "Where to put the SQLite database")
+    ("sqlitedboverwrite", po::value(&conf.sql_overwrite_file)->default_value(conf.sql_overwrite_file)
+        , "Overwrite the SQLite database file if it exists")
     ("cldatadumpratio", po::value(&conf.dump_individual_cldata_ratio)->default_value(conf.dump_individual_cldata_ratio)
         , "Only dump this ratio of clauses' data, randomly selected. Since machine learning doesn't need that much data, this can reduce the data you have to deal with.")
+    ("cllockdatagen", po::value(&conf.lock_for_data_gen_ratio)->default_value(conf.lock_for_data_gen_ratio)
+        , "Lock for data generation into lev0, setting locked_for_data_gen. Only works when clause is marked for dumping ('--cldatadumpratio' )")
     ;
 
     po::options_description printOptions("Printing options");
     printOptions.add_options()
     ("verbstat", po::value(&conf.verbStats)->default_value(conf.verbStats)
-        , "Change verbosity of statistics at the end of the solving [0..2]")
+        , "Change verbosity of statistics at the end of the solving [0..3]")
     ("verbrestart", po::value(&conf.print_full_restart_stat)->default_value(conf.print_full_restart_stat)
         , "Print more thorough, but different stats")
     ("verballrestarts", po::value(&conf.print_all_restarts)->default_value(conf.print_all_restarts)
@@ -761,23 +768,21 @@ void Main::add_supported_options()
         , "Treat all 'renumber' strategies as 'must-renumber'")
     ("fullwatchconseveryn", po::value(&conf.full_watch_consolidate_every_n_confl)->default_value(conf.full_watch_consolidate_every_n_confl)
         , "Consolidate watchlists fully once every N conflicts. Scheduled during simplification rounds.")
-    ("consolidatestaticorder", po::value(&conf.static_mem_consolidate_order)->default_value(conf.static_mem_consolidate_order)
-        , "Consolidate clause memory in static order. If set to 0, it's consolidated in activity order")
     ;
 
     po::options_description miscOptions("Misc options");
     miscOptions.add_options()
     //("noparts", "Don't find&solve subproblems with subsolvers")
-    ("strcachemaxm", po::value(&conf.watch_cache_stamp_based_str_time_limitM)->default_value(conf.watch_cache_stamp_based_str_time_limitM)
-        , "Maximum number of Mega-bogoprops(~time) to spend on vivifying long irred cls through watches, cache and stamps")
-
-
+    ("strmaxt", po::value(&conf.watch_based_str_time_limitM)->default_value(conf.watch_based_str_time_limitM)
+        , "Maximum MBP to spend on distilling long irred cls through watches")
     ("implicitmanip", po::value(&conf.doStrSubImplicit)->default_value(conf.doStrSubImplicit)
         , "Subsume and strengthen implicit clauses with each other")
     ("implsubsto", po::value(&conf.subsume_implicit_time_limitM)->default_value(conf.subsume_implicit_time_limitM)
         , "Timeout (in bogoprop Millions) of implicit subsumption")
     ("implstrto", po::value(&conf.distill_implicit_with_implicit_time_limitM)->default_value(conf.distill_implicit_with_implicit_time_limitM)
         , "Timeout (in bogoprop Millions) of implicit strengthening")
+    ("cardfind", po::value(&conf.doFindCard)->default_value(conf.doFindCard)
+        , "Find cardinality constraints")
     ;
 
     po::options_description reconfOptions("Reconf options");
@@ -805,12 +810,12 @@ void Main::add_supported_options()
         , "The maximum for scc search depth")
     ("simdrat", po::value(&conf.simulate_drat)->default_value(conf.simulate_drat)
         , "Simulate DRAT")
-    ("dumpdecformodel", po::value(&decisions_for_model_fname)->default_value(decisions_for_model_fname)
-        , "Decisions for model will be dumped here")
     ("sampling", po::value(&sampling_vars_str)->default_value(sampling_vars_str)
         , "Sampling vars, separated by comma")
     ("onlysampling", po::bool_switch(&only_sampling_solution)
         , "Print and ban(!) solutions only in terms of variables declared in 'c ind' or as --sampling '...'")
+    ("assump", po::value(&assump_filename)->default_value(assump_filename)
+        , "Assumptions file")
 
     //these a kind of special and determine positional options' meanings
     ("input", po::value< vector<string> >(), "file(s) to read")
@@ -818,30 +823,50 @@ void Main::add_supported_options()
         , "Put DRAT verification information into this file")
     ;
 
+#ifdef USE_BOSPHORUS
+    po::options_description bosph_options("Gauss options");
+    bosph_options.add_options()
+     ("bosph", po::value(&conf.do_bosphorus)->default_value(conf.do_bosphorus)
+        , "Execute bosphorus")
+     ("bospheveryn", po::value(&conf.bosphorus_every_n)->default_value(conf.bosphorus_every_n)
+        , "Execute bosphorus only every Nth iteration -- starting at Nth iter.")
+     ;
+#endif
+
 #ifdef USE_GAUSS
     po::options_description gaussOptions("Gauss options");
     gaussOptions.add_options()
-    ("maxgaussdepth", po::value(&conf.gaussconf.decision_until)->default_value(conf.gaussconf.decision_until)
-        , "Only run Gaussian Elimination until this depth. You may want this depth to be relatively small, such as 120-30, though it depends on the complexity of the problem. It is best to experiment.")
      ("maxmatrixrows", po::value(&conf.gaussconf.max_matrix_rows)->default_value(conf.gaussconf.max_matrix_rows)
-        , "Set maximum no. of rows for gaussian matrix. Too large matrixes"
+        , "Set maximum no. of rows for gaussian matrix. Too large matrices"
         "should bee discarded for reasons of efficiency")
     ("autodisablegauss", po::value(&conf.gaussconf.autodisable)->default_value(conf.gaussconf.autodisable)
         , "Automatically disable gauss when performing badly")
     ("minmatrixrows", po::value(&conf.gaussconf.min_matrix_rows)->default_value(conf.gaussconf.min_matrix_rows)
         , "Set minimum no. of rows for gaussian matrix. Normally, too small"
-        " matrixes are discarded for reasons of efficiency")
-    ("maxnummatrixes", po::value(&conf.gaussconf.max_num_matrixes)->default_value(conf.gaussconf.max_num_matrixes)
-        , "Maximum number of matrixes to treat.")
+        " matrices are discarded for reasons of efficiency")
+    ("maxnummatrices", po::value(&conf.gaussconf.max_num_matrices)->default_value(conf.gaussconf.max_num_matrices)
+        , "Maximum number of matrices to treat.")
+    ("detachxor", po::value(&conf.xor_detach_reattach)->default_value(conf.xor_detach_reattach)
+        , "Detach and reattach XORs")
+    ("useallmatrixes", po::value(&conf.force_use_all_matrixes)->default_value(conf.force_use_all_matrixes)
+        , "Force using all matrices")
+    ("detachverb", po::value(&conf.xor_detach_verb)->default_value(conf.xor_detach_verb)
+        , "If set, verbosity for XOR detach code is upped, ignoring normal verbosity")
+    ("gaussusefulcutoff", po::value(&conf.gaussconf.min_usefulness_cutoff)->default_value(conf.gaussconf.min_usefulness_cutoff)
+        , "Turn off Gauss if less than this many usefulenss ratio is recorded")
     ;
 #endif //USE_GAUSS
 
     help_options_complicated
     .add(generalOptions)
+    .add(polar_options)
     #if defined(USE_SQLITE3)
     .add(sqlOptions)
     #endif
     .add(restartOptions)
+    #if defined(FINAL_PREDICTOR)
+    .add(predictOptions)
+    #endif
     .add(printOptions)
     .add(propOptions)
     .add(chrono_bt_opts)
@@ -852,7 +877,12 @@ void Main::add_supported_options()
     .add(iterativeOptions)
     .add(probeOptions)
     .add(sls_options)
-    .add(stampOptions)
+#ifdef USE_BREAKID
+    .add(breakid_options)
+#endif
+#ifdef USE_BOSPHORUS
+    .add(bosph_options)
+#endif
     .add(simp_schedules)
     .add(occ_mem_limits)
     .add(tern_res_options)
@@ -862,9 +892,7 @@ void Main::add_supported_options()
     .add(eqLitOpts)
     .add(componentOptions)
     .add(mem_save_opts)
-    #if defined(USE_M4RI) || defined(USE_GAUSS)
     .add(xorOptions)
-    #endif
     .add(gateOptions)
     #ifdef USE_GAUSS
     .add(gaussOptions)
@@ -874,6 +902,7 @@ void Main::add_supported_options()
     .add(miscOptions)
     ;
 }
+/* clang-format on */
 
 string remove_last_comma_if_exists(std::string s)
 {
@@ -1030,6 +1059,8 @@ void Main::parse_restart_type()
             conf.restartType = Restart::luby;
         else if (type == "glue")
             conf.restartType = Restart::glue;
+        else if (type == "glue-geom")
+            conf.restartType = Restart::glue_geom;
         else throw WrongParam("restart", "unknown restart type");
     }
 }
@@ -1043,18 +1074,37 @@ void Main::parse_polarity_type()
         else if (mode == "false") conf.polarity_mode = PolarityMode::polarmode_neg;
         else if (mode == "rnd") conf.polarity_mode = PolarityMode::polarmode_rnd;
         else if (mode == "auto") conf.polarity_mode = PolarityMode::polarmode_automatic;
+        else if (mode == "weight") conf.polarity_mode = PolarityMode::polarmode_weighted;
         else throw WrongParam(mode, "unknown polarity-mode");
     }
 }
 
 void Main::manually_parse_some_options()
 {
-    if (conf.which_sls != "yalsat" && conf.which_sls != "walksat" && conf.which_sls != "ccnr") {
+    #ifndef USE_BREAKID
+    if (conf.doBreakid) {
+        if (conf.verbosity) {
+            cout << "c BreakID not compiled in, disabling" << endl;
+        }
+        conf.doBreakid = false;
+    }
+    #endif
+
+    if (conf.max_glue_cutoff_gluehistltlimited > 100000) {
+        cout << "ERROR: 'Maximum supported glue size is currently 100000" << endl;
+        exit(-1);
+    }
+
+    if (conf.which_sls != "yalsat" &&
+        conf.which_sls != "walksat" &&
+        conf.which_sls != "ccnr_yalsat" &&
+        conf.which_sls != "ccnr")
+    {
         cout << "ERROR: you gave '" << conf.which_sls << " for SLS with the option '--slstype'."
         << " This is incorrect, we only accept 'yalsat' and 'walksat'"
         << endl;
-        exit(-1);
     }
+
 
     if (conf.yalsat_max_mems < 1) {
         cout << "ERROR: '--walkmems' must be at least 1" << endl;
@@ -1078,23 +1128,6 @@ void Main::manually_parse_some_options()
         << endl;
 
         std::exit(-1);
-    }
-
-    if (!decisions_for_model_fname.empty() && max_nr_of_solutions > 1) {
-        std::cerr << "ERROR: dumping decisions for multi-solution makes no sense. Exiting." << endl;
-        std::exit(-1);
-    }
-
-    if (!decisions_for_model_fname.empty()) {
-        conf.need_decisions_reaching = true;
-    }
-
-    if (max_nr_of_solutions > 1) {
-        conf.need_decisions_reaching = true;
-    }
-
-    if (conf.random_var_freq < 0 || conf.random_var_freq > 1) {
-        throw WrongParam(lexical_cast<string>(conf.random_var_freq), "Illegal random var frequency ");
     }
 
     if (conf.preprocess != 0) {
@@ -1123,11 +1156,6 @@ void Main::manually_parse_some_options()
 
         if (max_nr_of_solutions > 1) {
             std::cerr << "ERROR: multi-solutions make no sense with preprocessing. Exiting." << endl;
-            std::exit(-1);
-        }
-
-        if (!decisions_for_model_fname.empty()) {
-            std::cerr << "ERROR: dumping decisions for model make no sense with preprocessing. Exiting." << endl;
             std::exit(-1);
         }
 
@@ -1226,7 +1254,7 @@ void Main::manually_parse_some_options()
                 << vm["input"].as<vector<string> >().size()+vm.count("drat")
                 << endl;
 
-            for(string s: vm["input"].as<vector<string> >()) {
+            for(const string& s: vm["input"].as<vector<string> >()) {
                 cout << " --> " << s << endl;
             }
             if (vm.count("drat")) {
@@ -1237,7 +1265,13 @@ void Main::manually_parse_some_options()
         if (vm["input"].as<vector<string> >().size() > 1) {
             conf.simplified_cnf = vm["input"].as<vector<string> >()[1];
         } else {
-            conf.simplified_cnf = vm["drat"].as<string>();
+            try {
+                conf.simplified_cnf = vm["drat"].as<string>();
+            } catch (boost::bad_any_cast &e) {
+                std::cerr
+                << "ERROR! Did you give a simplified CNF as a 2nd argument? You are preprocessing! So you must (and it must be a string)" << endl;
+                exit(-1);
+            }
         }
     }
 
@@ -1254,7 +1288,7 @@ void Main::manually_parse_some_options()
         handle_drat_option();
     }
 
-    if (conf.verbosity) {
+    if (conf.verbosity >= 3) {
         cout << "c Outputting solution to console" << endl;
     }
 }
@@ -1388,6 +1422,20 @@ int Main::solve()
     if (conf.preprocess != 2) {
         parseInAllFiles(solver);
     }
+    if (!assump_filename.empty()) {
+        std::ifstream* tmp = new std::ifstream;
+        tmp->open(assump_filename.c_str());
+        std::string temp;
+        while(std::getline(*tmp, temp)) {
+            //Do with temp
+            int x = std::stoi(temp);
+            cout << "Assume: " << x << endl;
+            Lit l = Lit(std::abs(x)-1, x < 0);
+            assumps.push_back(l);
+        }
+
+        delete tmp;
+    }
 
     lbool ret = multi_solutions();
 
@@ -1412,48 +1460,22 @@ int Main::solve()
     return correctReturnValue(ret);
 }
 
-void Main::dump_decisions_for_model()
-{
-    assert(max_nr_of_solutions == 1);
-    assert(solver->okay());
-
-    std::ofstream decfile;
-    decfile.open(decisions_for_model_fname.c_str());
-    if (!(decfile)) {
-        cout
-        << "ERROR: Couldn't open file '"
-        << decisions_for_model_fname
-        << "' for writing decisions!"
-        << endl;
-        std::exit(-1);
-    }
-
-    if (!solver->get_decision_reaching_valid()) {
-        decfile << "INVALID" << endl;
-        return;
-    }
-
-    if (conf.verbosity) {
-        cout << "c size of get_decisions_reaching_model: "
-        << solver->get_decisions_reaching_model().size()
-        << endl;
-    }
-    for(const Lit l: solver->get_decisions_reaching_model()) {
-        decfile << l << " 0" << endl;
-    }
-}
-
 lbool Main::multi_solutions()
 {
+    if (max_nr_of_solutions == 1
+        && conf.preprocess == 0
+        && dratf == NULL
+        && !conf.simulate_drat
+        && debugLib.empty()
+    ) {
+        solver->set_single_run();
+    }
+
     unsigned long current_nr_of_solutions = 0;
     lbool ret = l_True;
     while(current_nr_of_solutions < max_nr_of_solutions && ret == l_True) {
-        ret = solver->solve(NULL, only_sampling_solution);
+        ret = solver->solve(&assumps, only_sampling_solution);
         current_nr_of_solutions++;
-        if (ret == l_True && !decisions_for_model_fname.empty()) {
-            dump_decisions_for_model();
-            assert(max_nr_of_solutions == 1);
-        }
 
         if (ret == l_True && current_nr_of_solutions < max_nr_of_solutions) {
             printResultFunc(&cout, false, ret);
@@ -1471,33 +1493,32 @@ lbool Main::multi_solutions()
             solver->print_removed_vars();
             #endif
 
-            //Banning found solution
-            vector<Lit> lits;
-            if (sampling_vars.empty()) {
-                if (solver->get_decision_reaching_valid()) {
-                    //only decision vars
-                    for (Lit lit: solver->get_decisions_reaching_model()) {
-                      lits.push_back(~lit);
-                    }
-                } else {
-                    //all of the solution
-                    for (uint32_t var = 0; var < solver->nVars(); var++) {
-                        if (solver->get_model()[var] != l_Undef) {
-                            lits.push_back( Lit(var, (solver->get_model()[var] == l_True)? true : false) );
-                        }
-                    }
-                }
-            } else {
-              for (const uint32_t var: sampling_vars) {
-                  if (solver->get_model()[var] != l_Undef) {
-                      lits.push_back( Lit(var, (solver->get_model()[var] == l_True)? true : false) );
-                  }
-              }
+            if (!dont_ban_solutions) {
+                ban_found_solution();
             }
-            solver->add_clause(lits);
         }
     }
     return ret;
+}
+
+void Main::ban_found_solution()
+{
+    vector<Lit> lits;
+    if (sampling_vars.empty()) {
+        //all of the solution
+        for (uint32_t var = 0; var < solver->nVars(); var++) {
+            if (solver->get_model()[var] != l_Undef) {
+                lits.push_back( Lit(var, (solver->get_model()[var] == l_True)? true : false) );
+            }
+        }
+    } else {
+      for (const uint32_t var: sampling_vars) {
+          if (solver->get_model()[var] != l_Undef) {
+              lits.push_back( Lit(var, (solver->get_model()[var] == l_True)? true : false) );
+          }
+      }
+    }
+    solver->add_clause(lits);
 }
 
 ///////////

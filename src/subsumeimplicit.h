@@ -42,7 +42,7 @@ class SubsumeImplicit
 {
 public:
     explicit SubsumeImplicit(Solver* solver);
-    void subsume_implicit(bool check_stats = true);
+    void subsume_implicit(bool check_stats = true, std::string caller = std::string());
     uint32_t subsume_at_watch(const uint32_t at,
                               int64_t *timeAvail,
                               TouchList* touched = NULL);
@@ -53,8 +53,8 @@ public:
             *this = Stats();
         }
         Stats operator+=(const Stats& other);
-        void print_short(const Solver* solver) const;
-        void print() const;
+        void print_short(const Solver* solver, const char* caller) const;
+        void print(const char* caller) const;
 
         double time_used = 0.0;
         uint64_t numCalled = 0;

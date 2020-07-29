@@ -35,7 +35,7 @@ THE SOFTWARE.
 #include "time_mem.h"
 #include "sqlstats.h"
 #ifdef USE_GAUSS
-#include "EGaussian.h"
+#include "gaussian.h"
 #endif
 
 #ifdef USE_VALGRIND
@@ -176,30 +176,12 @@ of the clause. Therefore, the "currentlyUsedSizes" is an overestimation!!
 void ClauseAllocator::clauseFree(Clause* cl)
 {
     assert(!cl->freed());
-
-    bool quick_freed = false;
-    #ifdef USE_GAUSS
-    if (cl->gauss_temp_cl()) {
-        uint64_t neededbytes = (sizeof(Clause) + sizeof(Lit)*cl->size());
-        uint64_t needed
-            = neededbytes/sizeof(BASE_DATA_TYPE) + (bool)(neededbytes % sizeof(BASE_DATA_TYPE));
-
-        if (((BASE_DATA_TYPE*)cl + needed) == (dataStart + size)) {
-            size -= needed;
-            currentlyUsedSize -= needed;
-            quick_freed = true;
-        }
-    }
-    #endif
-
-    if (!quick_freed) {
-        cl->setFreed();
-        uint64_t est_num_cl = cl->size();
-        est_num_cl = std::max(est_num_cl, (uint64_t)3); //we sometimes allow gauss to allocate 3-long clauses
-        uint64_t bytes_freed = sizeof(Clause) + est_num_cl*sizeof(Lit);
-        uint64_t elems_freed = bytes_freed/sizeof(BASE_DATA_TYPE) + (bool)(bytes_freed % sizeof(BASE_DATA_TYPE));
-        currentlyUsedSize -= elems_freed;
-    }
+    cl->setFreed();
+    uint64_t est_num_cl = cl->size();
+    est_num_cl = std::max(est_num_cl, (uint64_t)3); //we sometimes allow gauss to allocate 3-long clauses
+    uint64_t bytes_freed = sizeof(Clause) + est_num_cl*sizeof(Lit);
+    uint64_t elems_freed = bytes_freed/sizeof(BASE_DATA_TYPE) + (bool)(bytes_freed % sizeof(BASE_DATA_TYPE));
+    currentlyUsedSize -= elems_freed;
 
     #ifdef VALGRIND_MAKE_MEM_UNDEFINED
     VALGRIND_MAKE_MEM_UNDEFINED(((char*)cl)+sizeof(Clause), cl->size()*sizeof(Lit));
@@ -291,57 +273,15 @@ void ClauseAllocator::consolidate(
     assert(sizeof(BASE_DATA_TYPE) % sizeof(Lit) == 0);
 
     vector<bool> visited(solver->watches.size(), 0);
-    Heap<Solver::VarOrderLt> &order_heap = solver->VSIDS ? solver->order_heap_vsids : solver->order_heap_maple;
-    if (solver->conf.static_mem_consolidate_order) {
-        for(auto& ws: solver->watches) {
-            move_one_watchlist(ws, newDataStart, new_ptr);
-        }
-    } else {
-        for(uint32_t i = 0; i < order_heap.size(); i++) {
-            for(uint32_t i2 = 0; i2 < 2; i2++) {
-                Lit lit = Lit(order_heap[i], i2);
-                assert(lit.toInt() < solver->watches.size());
-                move_one_watchlist(solver->watches[lit], newDataStart, new_ptr);
-                visited[lit.toInt()] = 1;
-            }
-        }
-        for(uint32_t i = 0; i < solver->watches.size(); i++) {
-            Lit lit = Lit::toLit(i);
-            watch_subarray ws = solver->watches[lit];
-            if (!visited[lit.toInt()]) {
-                move_one_watchlist(ws, newDataStart, new_ptr);
-                visited[lit.toInt()] = 1;
-            }
-        }
+    for(auto& ws: solver->watches) {
+        move_one_watchlist(ws, newDataStart, new_ptr);
     }
 
-    #ifdef USE_GAUSS
-    for (EGaussian* gauss : solver->gmatrixes) {
-        if (gauss == NULL) {
-            continue;
-        }
-
-        for(auto& gcl: gauss->clauses_toclear) {
-            Clause* old = ptr(gcl.first);
-            if (old->reloced) {
-                ClOffset new_offset = (*old)[0].toInt();
-                #ifdef LARGE_OFFSETS
-                new_offset += ((uint64_t)(*old)[1].toInt())<<32;
-                #endif
-                gcl.first = new_offset;
-            } else {
-                ClOffset new_offset = move_cl(newDataStart, new_ptr, old);
-                gcl.first = new_offset;
-            }
-            assert(!old->freed());
-        }
-    }
-    #endif //USE_GAUSS
-
-    update_offsets(solver->longIrredCls);
+    update_offsets(solver->longIrredCls, newDataStart, new_ptr);
     for(auto& lredcls: solver->longRedCls) {
-        update_offsets(lredcls);
+        update_offsets(lredcls, newDataStart, new_ptr);
     }
+    update_offsets(solver->detached_xor_repr_cls, newDataStart, new_ptr);
 
     //Fix up propBy
     for (size_t i = 0; i < solver->nVars(); i++) {
@@ -383,9 +323,9 @@ void ClauseAllocator::consolidate(
             log_2_size = std::log2(size);
         }
         cout << "c [mem] consolidate ";
-        cout << " old-sz: "; print_value_kilo_mega(old_size*sizeof(BASE_DATA_TYPE));
-        cout << " new-sz: "; print_value_kilo_mega(size*sizeof(BASE_DATA_TYPE));
-        cout << " new bits offs: " << std::fixed << std::setprecision(2) << log_2_size;
+        cout << " old-sz: " << print_value_kilo_mega(old_size*sizeof(BASE_DATA_TYPE))
+        << " new-sz: " << print_value_kilo_mega(size*sizeof(BASE_DATA_TYPE))
+        << " new bits offs: " << std::fixed << std::setprecision(2) << log_2_size;
         cout << solver->conf.print_times(time_used)
         << endl;
     }
@@ -399,16 +339,23 @@ void ClauseAllocator::consolidate(
 }
 
 void ClauseAllocator::update_offsets(
-    vector<ClOffset>& offsets
+    vector<ClOffset>& offsets,
+    ClOffset* newDataStart,
+    ClOffset*& new_ptr
 ) {
 
     for(ClOffset& offs: offsets) {
         Clause* old = ptr(offs);
-        assert(old->reloced);
-        offs = (*old)[0].toInt();
-        #ifdef LARGE_OFFSETS
-        offs += ((uint64_t)(*old)[1].toInt())<<32;
-        #endif
+        if (!old->reloced) {
+            assert(old->used_in_xor() && old->used_in_xor_full());
+            assert(old->_xor_is_detached);
+            offs = move_cl(newDataStart, new_ptr, old);
+        } else {
+            offs = (*old)[0].toInt();
+            #ifdef LARGE_OFFSETS
+            offs += ((uint64_t)(*old)[1].toInt())<<32;
+            #endif
+        }
     }
 }
 

@@ -24,24 +24,27 @@ THE SOFTWARE.
 #define __REDUCEDB_H__
 
 #include "clauseallocator.h"
-#include "clauseusagestats.h"
 
 namespace CMSat {
 
 class Solver;
+class ClPredictors;
+class ClusteringImp;
 
 class ReduceDB
 {
 public:
     ReduceDB(Solver* solver);
+    ~ReduceDB();
     double get_total_time() const {
         return total_time;
     }
     void handle_lev1();
     void handle_lev2();
-    void dump_sql_cl_data();
-    uint64_t nbReduceDB_lev1 = 0;
-    uint64_t nbReduceDB_lev2 = 0;
+    #ifdef FINAL_PREDICTOR
+    void handle_lev2_predictor();
+    #endif
+    void dump_sql_cl_data(const string& cur_rst_type);
 
 private:
     Solver* solver;
@@ -61,6 +64,11 @@ private:
 
     void sort_red_cls(ClauseClean clean_type);
     void mark_top_N_clauses(const uint64_t keep_num);
+
+    #ifdef FINAL_PREDICTOR
+    ClPredictors* predictors = NULL;
+    uint32_t num_times_lev3_called = 0;
+    #endif
 };
 
 }

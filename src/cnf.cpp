@@ -42,13 +42,6 @@ void CNF::new_var(const bool bva, const uint32_t orig_outer)
 
     minNumVars++;
     enlarge_minimal_datastructs();
-    if (conf.doCache) {
-        implCache.new_var();
-    }
-    if (conf.doStamp) {
-        stamp.new_var();
-    }
-
     if (orig_outer == std::numeric_limits<uint32_t>::max()) {
         //completely new var
         enlarge_nonminimial_datastructs();
@@ -97,13 +90,6 @@ void CNF::new_vars(const size_t n)
     if (nVars() + n >= 1ULL<<28) {
         cout << "ERROR! Variable requested is far too large" << endl;
         std::exit(-1);
-    }
-
-    if (conf.doCache) {
-        implCache.new_vars(n);
-    }
-    if (conf.doStamp) {
-        stamp.new_vars(n);
     }
 
     minNumVars += n;
@@ -181,8 +167,6 @@ void CNF::save_on_var_memory()
     //gwatches.consolidate();
     #endif
 
-    implCache.save_on_var_memorys(nVars());
-    stamp.save_on_var_memory(nVars());
     for(auto& l: longRedCls) {
         l.shrink_to_fit();
     }
@@ -221,10 +205,54 @@ void CNF::test_reflectivity_of_renumbering() const
     #endif
 }
 
+inline void CNF::updateWatch(
+    watch_subarray ws
+    , const vector<uint32_t>& outerToInter
+) {
+    for(Watched *it = ws.begin(), *end = ws.end()
+        ; it != end
+        ; ++it
+    ) {
+        if (it->isBin()) {
+            it->setLit2(
+                getUpdatedLit(it->lit2(), outerToInter)
+            );
+            continue;
+        }
+
+        assert(it->isClause());
+        const Clause &cl = *cl_alloc.ptr(it->get_offset());
+        Lit blocked_lit = it->getBlockedLit();
+        blocked_lit = getUpdatedLit(it->getBlockedLit(), outerToInter);
+        bool found = false;
+        for(Lit lit: cl) {
+            if (lit == blocked_lit) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            it->setBlockedLit(cl[2]);
+        } else {
+            it->setBlockedLit(blocked_lit);
+        }
+    }
+}
+
 void CNF::updateVars(
     const vector<uint32_t>& outerToInter
     , const vector<uint32_t>& interToOuter
+    , const vector<uint32_t>& interToOuter2
 ) {
+    updateArray(varData, interToOuter);
+    updateArray(assigns, interToOuter);
+    updateBySwap(watches, seen, interToOuter2);
+
+    for(watch_subarray w: watches) {
+        if (!w.empty())
+            updateWatch(w, outerToInter);
+    }
+
     updateArray(interToOuterMain, interToOuter);
     updateArrayMapCopy(outerToInterMain, outerToInter);
 }
@@ -327,21 +355,6 @@ size_t CNF::mem_used_renumberer() const
     return mem;
 }
 
-
-vector<lbool> CNF::map_back_to_without_bva(const vector<lbool>& val) const
-{
-    vector<lbool> ret;
-    assert(val.size() == nVarsOuter());
-    ret.reserve(nVarsOutside());
-    for(size_t i = 0; i < nVarsOuter(); i++) {
-        if (!varData[map_outer_to_inter(i)].is_bva) {
-            ret.push_back(val[i]);
-        }
-    }
-    assert(ret.size() == nVarsOutside());
-    return ret;
-}
-
 vector<uint32_t> CNF::build_outer_to_without_bva_map() const
 {
     vector<uint32_t> ret;
@@ -433,6 +446,19 @@ bool CNF::normClauseIsAttached(const ClOffset offset) const
 
     attached &= findWCl(watches[cl[0]], offset);
     attached &= findWCl(watches[cl[1]], offset);
+
+    if (detached_xor_clauses && cl._xor_is_detached) {
+        //We expect this NOT to be attached, actually.
+        if (attached) {
+            cout
+            << "Failed. XOR-representing clause is NOT supposed to be attached"
+            << " clause: " << cl
+            << " _xor_is_detached: " << cl._xor_is_detached
+            << " detached_xor_clauses: " << detached_xor_clauses
+            << endl;
+        }
+        return !attached;
+    }
 
     bool satisfied = satisfied_cl(cl);
     uint32_t num_false2 = 0;
@@ -526,25 +552,45 @@ void CNF::find_all_attach(const vector<ClOffset>& cs) const
         ; ++it
     ) {
         Clause& cl = *cl_alloc.ptr(*it);
+        bool should_be_attached = true;
+        if (detached_xor_clauses && cl._xor_is_detached) {
+            should_be_attached = false;
+        }
         bool ret = findWCl(watches[cl[0]], *it);
-        if (!ret) {
+        if (ret != should_be_attached) {
             cout
             << "Clause " << cl
-            << " (red: " << cl.red() << ")"
-            << " doesn't have its 1st watch attached!"
-            << endl;
+            << " (red: " << cl.red()
+            << " used in xor: " << cl.used_in_xor()
+            << " detached xor: " << cl._xor_is_detached
+            << " should be attached: " << should_be_attached
+            << " )";
+            if (ret) {
+                cout << " doesn't have its 1st watch attached!";
+            } else {
+                cout << " HAS its 1st watch attached (but it should NOT)!";
+            }
+            cout << endl;
 
             assert(false);
             std::exit(-1);
         }
 
         ret = findWCl(watches[cl[1]], *it);
-        if (!ret) {
+        if (ret != should_be_attached) {
             cout
             << "Clause " << cl
-            << " (red: " << cl.red() << ")"
-            << " doesn't have its 2nd watch attached!"
-            << endl;
+            << " (red: " << cl.red()
+            << " used in xor: " << cl.used_in_xor()
+            << " detached xor: " << cl._xor_is_detached
+            << " should be attached: " << should_be_attached
+            << " )";
+            if (ret) {
+                cout << " doesn't have its 2nd watch attached!";
+            } else {
+                cout << " HAS its 2nd watch attached (but it should NOT)!";
+            }
+            cout << endl;
 
             assert(false);
             std::exit(-1);
@@ -716,4 +762,83 @@ void CNF::add_drat(std::ostream* os, bool add_ID) {
         drat = new DratFile<false>(interToOuterMain);
     }
     drat->setFile(os);
+}
+
+vector<uint32_t> CNF::get_outside_var_incidence()
+{
+    vector<uint32_t> inc;
+    inc.resize(nVars(), 0);
+    for(uint32_t i = 0; i < nVars()*2; i++) {
+        const Lit l = Lit::toLit(i);
+        for(const auto& x: watches[l]) {
+            if (x.isBin() && !x.red()) {
+                inc[x.lit2().var()]++;
+                inc[l.var()]++;
+            }
+        }
+    }
+
+    for(const auto& offs: longIrredCls) {
+        Clause* cl = cl_alloc.ptr(offs);
+        for(const auto& l: *cl) {
+            inc[l.var()]++;
+        }
+    }
+
+    //Map to outer
+    vector<uint32_t> inc_outer(nVarsOuter(), 0);
+    for(uint32_t i = 0; i < inc.size(); i ++) {
+        uint32_t outer = map_inter_to_outer(i);
+        inc_outer[outer] = inc[i];
+    }
+
+    //Map to outside
+    if (get_num_bva_vars() != 0) {
+        inc_outer = map_back_vars_to_without_bva(inc_outer);
+    }
+    return inc_outer;
+}
+
+vector<uint32_t> CNF::get_outside_var_incidence_also_red()
+{
+    vector<uint32_t> inc;
+    inc.resize(nVars(), 0);
+    for(uint32_t i = 0; i < nVars()*2; i++) {
+        const Lit l = Lit::toLit(i);
+        for(const auto& x: watches[l]) {
+            if (x.isBin()) {
+                inc[x.lit2().var()]++;
+                inc[l.var()]++;
+            }
+        }
+    }
+
+    for(const auto& offs: longIrredCls) {
+        Clause* cl = cl_alloc.ptr(offs);
+        for(const auto& l: *cl) {
+            inc[l.var()]++;
+        }
+    }
+
+    for(const auto& reds: longRedCls) {
+        for(const auto& offs: reds) {
+            Clause* cl = cl_alloc.ptr(offs);
+            for(const auto& l: *cl) {
+                inc[l.var()]++;
+            }
+        }
+    }
+
+    //Map to outer
+    vector<uint32_t> inc_outer(nVarsOuter(), 0);
+    for(uint32_t i = 0; i < inc.size(); i ++) {
+        uint32_t outer = map_inter_to_outer(i);
+        inc_outer[outer] = inc[i];
+    }
+
+    //Map to outside
+    if (get_num_bva_vars() != 0) {
+        inc_outer = map_back_vars_to_without_bva(inc_outer);
+    }
+    return inc_outer;
 }

@@ -33,6 +33,7 @@ THE SOFTWARE.
 
 #include "constants.h"
 #include "propby.h"
+#include "vmtf.h"
 
 #include "avgcalc.h"
 #include "propby.h"
@@ -50,7 +51,6 @@ class Solver;
 class SQLStats;
 
 //#define VERBOSE_DEBUG_FULLPROP
-//#define DEBUG_STAMPING
 //#define VERBOSE_DEBUG
 
 #ifdef VERBOSE_DEBUG
@@ -97,6 +97,7 @@ public:
     //
     PropEngine(
         const SolverConf* _conf
+        , Solver* solver
         , std::atomic<bool>* _must_interrupt_inter
     );
     ~PropEngine();
@@ -121,27 +122,42 @@ public:
     template<bool update_bogoprops = true>
     void enqueue(const Lit p);
     void new_decision_level();
-    vector<double> var_act_vsids;
-    vector<double> var_act_maple;
-    vector<double> lit_act_lsids;
 
-    //Variable activities
+    /////////////////////
+    // Branching
+    /////////////////////
+    vector<ActAndOffset> var_act_vsids;
+    vector<ActAndOffset> var_act_maple;
+    double var_decay;
+    double var_decay_max;
+    double maple_step_size;
     struct VarOrderLt { ///Order variables according to their activities
-        const vector<double>&  activities;
+        const vector<ActAndOffset>&  activities;
         bool operator () (const uint32_t x, const uint32_t y) const
         {
-            return activities[x] > activities[y];
+            return activities[x].combine() > activities[y].combine();
         }
 
-        explicit VarOrderLt(const vector<double>& _activities) :
+        explicit VarOrderLt(const vector<ActAndOffset>& _activities) :
             activities(_activities)
         {}
     };
-
     ///activity-ordered heap of decision variables.
-    ///NOT VALID WHILE SIMPLIFYING
-    Heap<VarOrderLt> order_heap_vsids;
-    Heap<VarOrderLt> order_heap_maple;
+    Heap<VarOrderLt> order_heap_vsids; ///NOT VALID WHILE SIMPLIFYING
+    Heap<VarOrderLt> order_heap_maple; ///NOT VALID WHILE SIMPLIFYING
+    #ifdef VMTF_NEEDED
+    Queue vmtf_queue;
+    vector<uint64_t> vmtf_btab; // enqueue time stamps for queue
+    void vmtf_update_queue_unassigned (uint32_t idx);
+    void vmtf_init_enqueue (uint32_t idx);
+    void vmtf_bump_queue (uint32_t var);
+    Link & vmtf_link (uint32_t var) { return vmtf_links[var]; }
+    Links vmtf_links; // table of vmtf_links for decision queue
+    #endif
+    double max_vsids_act = 0.0;
+
+    //Clause activities
+    double max_cl_act = 0.0;
 
 protected:
     int64_t simpDB_props = 0;
@@ -159,24 +175,16 @@ protected:
 
     // Solver state:
     //
-    vector<Trail>         trail;            ///< Assignment stack; stores all assignments made in the order they were made.
+    vector<Trail>  trail; ///< Assignment stack; stores all assignments made in the order they were made.
     vector<uint32_t>    trail_lim;        ///< Separator indices for different decision levels in 'trail'.
     uint32_t            qhead;            ///< Head of queue (as index into the trail)
     Lit                 failBinLit;       ///< Used to store which watches[lit] we were looking through when conflict occured
 
     friend class EGaussian;
 
+    PropBy propagate_any_order_fast();
     template<bool update_bogoprops>
     PropBy propagate_any_order();
-    PropBy propagate_any_order_fast();
-    PropBy propagate_strict_order();
-    /*template<bool update_bogoprops>
-    bool handle_xor_cl(
-        Watched*& i
-        , Watched*& &j
-        , const Lit p
-        , PropBy& confl
-    );*/
     PropResult prop_normal_helper(
         Clause& c
         , ClOffset offset
@@ -238,9 +246,7 @@ protected:
     void updateVars(
         const vector<uint32_t>& outerToInter
         , const vector<uint32_t>& interToOuter
-        , const vector<uint32_t>& interToOuter2
     );
-    void updateWatch(watch_subarray ws, const vector<uint32_t>& outerToInter);
 
     size_t mem_used() const
     {
@@ -253,6 +259,7 @@ protected:
     }
 
 private:
+    Solver* solver;
     bool propagate_binary_clause_occur(const Watched& ws);
     bool propagate_long_clause_occur(const ClOffset offset);
     template<bool update_bogoprops = true>
@@ -270,11 +277,8 @@ private:
         , PropBy& confl
         , uint32_t currLevel
     );
+    void sql_dump_vardata_picktime(uint32_t v, PropBy from);
 };
-
-
-///////////////////////////////////////
-// Implementation of inline methods:
 
 inline void PropEngine::new_decision_level()
 {
@@ -319,7 +323,7 @@ uint32_t PropEngine::calc_glue(const T& ps)
         if (l != 0 && permDiff[l] != MYFLAG) {
             permDiff[l] = MYFLAG;
             nblevels++;
-            if (nblevels >= 50) {
+            if (nblevels >= conf.max_glue_cutoff_gluehistltlimited) {
                 return nblevels;
             }
         }
@@ -390,7 +394,6 @@ inline PropResult PropEngine::handle_normal_prop_fail(
     //Update stats
     #ifdef STATS_NEEDED
     c.stats.conflicts_made++;
-    c.stats.sum_of_branch_depth_conflict += decisionLevel() + 1;
     if (c.red())
         lastConflictCausedBy = ConflCausedBy::longred;
     else
@@ -423,8 +426,8 @@ void PropEngine::enqueue(const Lit p, const uint32_t level, const PropBy from)
 
     #ifdef ENQUEUE_DEBUG
     assert(trail.size() <= nVarsOuter());
-    assert(varData[p.var()].removed == Removed::none);
     #endif
+    assert(varData[p.var()].removed == Removed::none);
 
     const uint32_t v = p.var();
     assert(value(v) == l_Undef);
@@ -432,26 +435,56 @@ void PropEngine::enqueue(const Lit p, const uint32_t level, const PropBy from)
         watches.prefetch((~p).toInt());
     }
 
-    if (!update_bogoprops && !VSIDS && from != PropBy()) {
-        varData[v].last_picked = sumConflicts;
-        varData[v].conflicted = 0;
+    if (!update_bogoprops &&
+        branch_strategy == branch::maple &&
+        from != PropBy())
+    {
+        varData[v].maple_last_picked = sumConflicts;
+        varData[v].maple_conflicted = 0;
 
-        assert(sumConflicts >= varData[v].cancelled);
-        uint32_t age = sumConflicts - varData[v].cancelled;
+        assert(sumConflicts >= varData[v].maple_cancelled);
+        uint32_t age = sumConflicts - varData[v].maple_cancelled;
         if (age > 0) {
-            double decay = std::pow(maple_decay_base, age);
-            var_act_maple[v] *= decay;
+            double decay = std::pow(var_decay, age);
+            var_act_maple[v].act *= decay;
             if (order_heap_maple.inHeap(v))
                 order_heap_maple.increase(v);
         }
     }
+
+    #if defined(STATS_NEEDED_BRANCH) || defined(FINAL_PREDICTOR_BRANCH)
+    if (!update_bogoprops) {
+        varData[v].set++;
+        if (from == PropBy()) {
+            #ifdef STATS_NEEDED_BRANCH
+            sql_dump_vardata_picktime(v, from);
+            varData[v].num_decided++;
+            varData[v].last_decided_on = sumConflicts;
+            if (!p.sign()) varData[v].num_decided_pos++;
+            #endif
+        } else {
+            sumPropagations++;
+            #ifdef STATS_NEEDED_BRANCH
+            bool flipped = (varData[v].polarity != !p.sign());
+            if (flipped) {
+                varData[v].last_flipped = sumConflicts;
+            }
+            varData[v].num_propagated++;
+            varData[v].last_propagated = sumConflicts;
+            if (!p.sign()) varData[v].num_propagated_pos++;
+            #endif
+        }
+    }
+    #endif
 
     const bool sign = p.sign();
     assigns[v] = boolToLBool(!sign);
     varData[v].reason = from;
     varData[v].level = level;
     if (!update_bogoprops) {
-        varData[v].polarity = !sign;
+        if (polarity_mode == PolarityMode::polarmode_automatic) {
+            varData[v].polarity = !sign;
+        }
         #ifdef STATS_NEEDED
         if (sign) {
             propStats.varSetNeg++;

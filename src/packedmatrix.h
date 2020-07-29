@@ -50,15 +50,25 @@ public:
 
     ~PackedMatrix()
     {
-        delete[] mp;
+        #ifdef _MSC_VER
+        _aligned_free((void*)mp);
+        #else
+        free(mp);
+        #endif
     }
 
     void resize(const uint32_t num_rows, uint32_t num_cols)
     {
         num_cols = num_cols / 64 + (bool)(num_cols % 64);
-        if (numRows*(numCols+1) < num_rows*(num_cols+1)) {
-            delete[] mp;
-            mp = new uint64_t[num_rows*(num_cols+1)];
+        if (numRows*(numCols+1) < (int)num_rows*((int)num_cols+1)) {
+            size_t size = sizeof(int64_t) * num_rows*(num_cols+1);
+            #ifdef _MSC_VER
+            _aligned_free((void*)mp);
+            mp =  (int64_t*)_aligned_malloc(size, 16);
+            #else
+            free(mp);
+            posix_memalign((void**)&mp, 16,  size);
+            #endif
         }
 
         numRows = num_rows;
@@ -67,31 +77,30 @@ public:
 
     void resizeNumRows(const uint32_t num_rows)
     {
-        #ifdef DEBUG_MATRIX
-        assert(num_rows <= numRows);
-        #endif
-
+        assert((int)num_rows <= numRows);
         numRows = num_rows;
     }
 
     PackedMatrix& operator=(const PackedMatrix& b)
     {
-        #ifdef DEBUG_MATRIX
-        //assert(b.numRows > 0 && b.numCols > 0);
-        #endif
-
         if (numRows*(numCols+1) < b.numRows*(b.numCols+1)) {
-            delete[] mp;
-            mp = new uint64_t[b.numRows*(b.numCols+1)];
+            size_t size = sizeof(int64_t) * b.numRows*(b.numCols+1);
+            #ifdef _MSC_VER
+            _aligned_free((void*)mp);
+            mp =  (int64_t*)_aligned_malloc(size, 16);
+            #else
+            free(mp);
+            posix_memalign((void**)&mp, 16,  size);
+            #endif
         }
         numRows = b.numRows;
         numCols = b.numCols;
-        memcpy(mp, b.mp, sizeof(uint64_t)*numRows*(numCols+1));
+        memcpy(mp, b.mp, sizeof(int)*numRows*(numCols+1));
 
         return *this;
     }
 
-    inline PackedRow getMatrixAt(const uint32_t i)
+    inline PackedRow operator[](const uint32_t i)
     {
         #ifdef DEBUG_MATRIX
         assert(i <= numRows);
@@ -101,7 +110,7 @@ public:
 
     }
 
-    inline PackedRow getMatrixAt(const uint32_t i) const
+    inline PackedRow operator[](const uint32_t i) const
     {
         #ifdef DEBUG_MATRIX
         assert(i <= numRows);
@@ -154,21 +163,21 @@ public:
         }
 
     private:
-        iterator(uint64_t* _mp, const uint32_t _numCols) :
+        iterator(int64_t* _mp, const uint32_t _numCols) :
             mp(_mp)
             , numCols(_numCols)
         {}
 
-        uint64_t* mp;
+        int64_t *mp;
         const uint32_t numCols;
     };
 
-    inline iterator beginMatrix()
+    inline iterator begin()
     {
         return iterator(mp, numCols);
     }
 
-    inline iterator endMatrix()
+    inline iterator end()
     {
         return iterator(mp+numRows*(numCols+1), numCols);
     }
@@ -180,9 +189,9 @@ public:
 
 private:
 
-    uint64_t* mp;
-    uint32_t numRows;
-    uint32_t numCols;
+    int64_t *mp;
+    int numRows;
+    int numCols;
 };
 
 }

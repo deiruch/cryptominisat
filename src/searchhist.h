@@ -35,26 +35,26 @@ namespace CMSat {
 //History
 struct SearchHist {
     //About the search
+    uint32_t num_conflicts_this_restart = 0;
     AvgCalc<uint32_t>   branchDepthHist;     ///< Avg branch depth in current restart
     AvgCalc<uint32_t>   branchDepthDeltaHist;
 
     AvgCalc<uint32_t>   backtrackLevelHistLT;
     AvgCalc<uint32_t>   trailDepthHistLT;
-    AvgCalc<uint32_t>   vsidsVarsAvgLT; //vsids_vars.avg()
 
     bqueue<uint32_t>    trailDepthHistLonger; ///<total depth, incl. props, decisions and assumps
     AvgCalc<uint32_t>   trailDepthDeltaHist; ///<for THIS restart only
 
     //About the confl generated
-    bqueue<uint32_t>    glueHist;   ///< Set of last decision levels in (glue of) conflict clauses
-    AvgCalc<uint32_t>   glueHistLTLimited; //LIMITED, only glue-based restart, max 50 glue
-    AvgCalc<uint32_t>   glueHistLTAll;
+    bqueue<uint32_t>    glueHist;          ///< Conflict glue history (this restart only)
+    AvgCalc<uint32_t>   glueHistLT;        ///< Conflict glue history (all restarts)
+    AvgCalc<uint32_t>   glueHistLTLimited; //As before, but ONLY glue-based restart, max 50 glue
 
-    AvgCalc<uint32_t>   conflSizeHist;       ///< Conflict size history
-    AvgCalc<uint32_t>   conflSizeHistLT;
+    AvgCalc<uint32_t>   conflSizeHist;       ///< Conflict size history (this restart only)
+    AvgCalc<uint32_t>   conflSizeHistLT;     ///< Conflict size history (all restarts)
     AvgCalc<uint32_t>   numResolutionsHistLT;
 
-    #ifdef STATS_NEEDED
+    #if defined(STATS_NEEDED) || defined(FINAL_PREDICTOR)
     bqueue<uint32_t>    backtrackLevelHist;
     AvgCalc<uint32_t>   overlapHistLT;
     AvgCalc<uint32_t>   antec_data_sum_sizeHistLT;
@@ -73,7 +73,7 @@ struct SearchHist {
         used += sizeof(AvgCalc<double, double>)*2;
         used += glueHist.usedMem();
         used += trailDepthHistLonger.usedMem();
-        #ifdef STATS_NEEDED
+        #if defined(STATS_NEEDED) || defined(FINAL_PREDICTOR)
         used += backtrackLevelHist.usedMem();
         used += branchDepthHistQueue.usedMem();
         #endif
@@ -84,6 +84,7 @@ struct SearchHist {
     void clear()
     {
         //About the search
+        num_conflicts_this_restart = 0;
         branchDepthHist.clear();
         branchDepthDeltaHist.clear();
         trailDepthDeltaHist.clear();
@@ -92,7 +93,7 @@ struct SearchHist {
         glueHist.clear();
         conflSizeHist.clear();
 
-        #ifdef STATS_NEEDED
+        #if defined(STATS_NEEDED) || defined(FINAL_PREDICTOR)
         numResolutionsHist.clear();
         trailDepthHist.clear();
         branchDepthHistQueue.clear();
@@ -102,7 +103,7 @@ struct SearchHist {
     void reset_glue_hist_size(size_t shortTermHistorySize)
     {
         glueHist.clearAndResize(shortTermHistorySize);
-        #ifdef STATS_NEEDED
+        #if defined(STATS_NEEDED) || defined(FINAL_PREDICTOR)
         backtrackLevelHist.clearAndResize(shortTermHistorySize);
         trailDepthHist.clearAndResize(shortTermHistorySize);
         branchDepthHistQueue.clearAndResize(shortTermHistorySize);
@@ -113,7 +114,7 @@ struct SearchHist {
     {
         glueHist.clearAndResize(shortTermHistorySize);
         trailDepthHistLonger.clearAndResize(blocking_trail_hist_size);
-        #ifdef STATS_NEEDED
+        #if defined(STATS_NEEDED) || defined(FINAL_PREDICTOR)
         backtrackLevelHist.clearAndResize(shortTermHistorySize);
         trailDepthHist.clearAndResize(shortTermHistorySize);
         branchDepthHistQueue.clearAndResize(shortTermHistorySize);
@@ -128,7 +129,7 @@ struct SearchHist {
         #ifdef STATS_NEEDED
         << std::right << glueHist.getLongtTerm().avgPrint(1, 5)
         #endif
-        << "/" << std::left << glueHistLTAll.avgPrint(1, 5)
+        << "/" << std::left << glueHistLT.avgPrint(1, 5)
 
         << " confllen"
         << " " << std::right << conflSizeHist.avgPrint(1, 5)

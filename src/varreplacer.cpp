@@ -28,6 +28,10 @@ THE SOFTWARE.
 #include "clauseallocator.h"
 #include "sqlstats.h"
 #include "sccfinder.h"
+#ifdef USE_BREAKID
+#include "cms_breakid.h"
+#endif
+
 #include <iostream>
 #include <iomanip>
 #include <set>
@@ -98,19 +102,8 @@ void VarReplacer::updateVars(
     const std::vector< uint32_t >& /*outerToInter*/
     , const std::vector< uint32_t >& /*interToOuter*/
 ) {
-
-    /*updateArray(table, interToOuter);
-    updateLitsMap(table, outerToInter);
-    map<uint32_t, vector<uint32_t> > newReverseTable;
-    for(map<uint32_t, vector<uint32_t> >::iterator
-        it = reverseTable.begin(), end = reverseTable.end()
-        ; it != end
-        ; ++it
-    ) {
-        updateArrayMapCopy(it->second, outerToInter);
-        newReverseTable[outerToInter.at(it->first)] = it->second;
-    }
-    reverseTable.swap(newReverseTable);*/
+    //Nothing to do, we keep OUTER in all these data structures
+    //hence, it needs no update
 }
 
 void VarReplacer::printReplaceStats() const
@@ -159,14 +152,10 @@ void VarReplacer::update_vardata_and_activities(
     assert(solver->value(replaced_with_var) == l_Undef);
 
     //Update activities
-    solver->var_act_vsids[replaced_with_var] += solver->var_act_vsids[orig_var];
-    solver->var_act_maple[replaced_with_var] += solver->var_act_maple[orig_var];
+    solver->var_act_vsids[replaced_with_var].add_in(solver->var_act_vsids[orig_var]);
+    solver->var_act_maple[replaced_with_var].add_in(solver->var_act_maple[orig_var]);
 
     assert(orig_var <= solver->nVars() && replaced_with_var <= solver->nVars());
-
-    //Update LSIDS
-    solver->lit_act_lsids[replaced_with.toInt()] += solver->lit_act_lsids[orig.toInt()];
-    solver->lit_act_lsids[(~replaced_with).toInt()] += solver->lit_act_lsids[(~orig).toInt()];
 }
 
 bool VarReplacer::enqueueDelayedEnqueue()
@@ -196,7 +185,7 @@ void VarReplacer::attach_delayed_attach()
 {
     for(Clause* c: delayed_attach_or_free) {
         if (c->size() <= 2) {
-            solver->cl_alloc.clauseFree(c);
+            solver->free_cl(c);
         } else {
             c->unset_removed();
             solver->attachClause(*c);
@@ -276,8 +265,15 @@ bool VarReplacer::perform_replace()
     }
     solver->clean_occur_from_removed_clauses_only_smudged();
     attach_delayed_attach();
-    if (!replace_xor_clauses()) {
+    if (!replace_xor_clauses(solver->xorclauses)) {
         goto end;
+    }
+
+    if (!replace_xor_clauses(solver->xorclauses_unused)) {
+        goto end;
+    }
+    for(auto& v: solver->removed_xorclauses_clash_vars) {
+        v = get_var_replaced_with_fast(v);
     }
 
     //While replacing the clauses
@@ -289,6 +285,11 @@ bool VarReplacer::perform_replace()
     }
 
     solver->update_assumptions_after_varreplace();
+#ifdef USE_BREAKID
+    if (solver->breakid) {
+        solver->breakid->update_var_after_varreplace();
+    }
+#endif
 
 end:
     delayed_attach_or_free.clear();
@@ -328,16 +329,32 @@ end:
     return solver->okay();
 }
 
-bool VarReplacer::replace_xor_clauses()
+bool VarReplacer::replace_xor_clauses(vector<Xor>& xors)
 {
-    for(Xor& x: solver->xorclauses) {
-        for(uint32_t i = 0, end = x.size(); i < end; i++) {
-            assert(x[i] < solver->nVars());
-            Lit l = Lit(x[i], false);
+    for(Xor& x: xors) {
+        uint32_t j = 0;
+        for(uint32_t i = 0; i < x.clash_vars.size(); i++) {
+            uint32_t v = x.clash_vars[i];
+            uint32_t upd = get_var_replaced_with_fast(v);
+            if (!solver->seen[upd]) {
+                solver->seen[upd] = 1;
+                x.clash_vars[j++] = upd;
+            }
+        }
+        x.clash_vars.resize(j);
+
+        for(auto& v: x.clash_vars) {
+            solver->seen[v] = 0;
+        }
+
+        for(uint32_t& v: x) {
+            assert(v < solver->nVars());
+
+            Lit l = Lit(v, false);
             if (get_lit_replaced_with_fast(l) != l) {
                 l = get_lit_replaced_with_fast(l);
                 x.rhs ^= l.sign();
-                x[i] = l.var();
+                v = l.var();
                 runStats.replacedLits++;
             }
         }
@@ -366,7 +383,7 @@ inline void VarReplacer::updateBin(
         delayedEnqueue.push_back(lit2);
         (*solver->drat) << add << lit2
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin;
@@ -398,7 +415,7 @@ inline void VarReplacer::updateBin(
         (*solver->drat)
         << add << lit1 << lit2
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin
@@ -445,7 +462,6 @@ bool VarReplacer::replaceImplicit()
 
     for(size_t at = 0; at < solver->watches.get_smudged_list().size(); at++) {
         const Lit origLit1 = solver->watches.get_smudged_list()[at];
-        //const Lit origLit1 = Lit::toLit(at);
         watch_subarray ws = solver->watches[origLit1];
 
         Watched* i = ws.begin();
@@ -558,7 +574,7 @@ Lit* my_lit_find(Clause& cl, const Lit lit)
 }
 
 /**
-@brief Helper function for replace_set()
+@returns TRUE if needs removal
 */
 bool VarReplacer::handleUpdatedClause(
     Clause& c
@@ -598,7 +614,7 @@ bool VarReplacer::handleUpdatedClause(
 
     if (satisfied) {
         (*solver->drat) << findelay;
-        c.shrink(c.size()); //so we free() it
+        c.shrink(c.size()); //needed to make clause cleaner happy
         solver->watches.smudge(origLit1);
         solver->watches.smudge(origLit2);
         c.setRemoved();
@@ -667,6 +683,11 @@ void VarReplacer::set_sub_var_during_solution_extension(uint32_t var, const uint
     const lbool to_set = solver->model[var] ^ table[sub_var].sign();
     const uint32_t sub_var_inter = solver->map_outer_to_inter(sub_var);
     assert(solver->varData[sub_var_inter].removed == Removed::replaced);
+    #ifdef VERBOSE_DEBUG
+    if (solver->model_value(sub_var) != l_Undef) {
+        cout << "ERROR: var " << sub_var +1 << " is set but it's replaced!" << endl;
+    }
+    #endif
     assert(solver->model_value(sub_var) == l_Undef);
 
     if (solver->conf.verbosity > 10) {
@@ -688,6 +709,21 @@ void VarReplacer::extend_model(const uint32_t var)
     for(const uint32_t sub_var: it->second)
     {
         set_sub_var_during_solution_extension(var, sub_var);
+    }
+}
+
+void VarReplacer::extend_pop_queue(vector<Lit>& pop)
+{
+    vector<Lit> extra;
+    for (Lit p: pop) {
+        const auto& repl = reverseTable[p.var()];
+        for(uint32_t x: repl) {
+            extra.push_back(Lit(x, table[x].sign() ^ p.sign()));
+        }
+    }
+
+    for(Lit x: extra) {
+        pop.push_back(x);
     }
 }
 
@@ -745,28 +781,28 @@ bool VarReplacer::handleAlreadyReplaced(const Lit lit1, const Lit lit2)
         (*solver->drat)
         << add << ~lit1 << lit2
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin
 
         << add << lit1 << ~lit2
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin
 
         << add << lit1
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin
 
         << add << ~lit1
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin;
@@ -789,14 +825,14 @@ bool VarReplacer::replace_vars_already_set(
         (*solver->drat)
         << add << ~lit1
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin
 
         << add << lit1
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin;
@@ -824,7 +860,7 @@ bool VarReplacer::handleOneSet(
         solver->enqueue(toEnqueue);
         (*solver->drat) << add << toEnqueue
         #ifdef STATS_NEEDED
-        << solver->clauseID++
+        << 0
         << solver->sumConflicts
         #endif
         << fin;
@@ -874,13 +910,13 @@ bool VarReplacer::replace(
     (*solver->drat)
     << add << ~lit1 << lit2
     #ifdef STATS_NEEDED
-    << solver->clauseID++
+    << 0
     << solver->sumConflicts
     #endif
     << fin
     << add << lit1 << ~lit2
     #ifdef STATS_NEEDED
-    << solver->clauseID++
+    << 0
     << solver->sumConflicts
     #endif
     << fin;
@@ -1013,7 +1049,8 @@ bool VarReplacer::replace_if_enough_is_found(const size_t limit, uint64_t* bogop
     }
 
     #ifdef USE_GAUSS
-    solver->clearEnGaussMatrixes();
+    assert(solver->gmatrices.empty());
+    assert(solver->gqueuedata.empty());
     #endif
 
     if (replaced)
@@ -1288,19 +1325,4 @@ void VarReplacer::load_state(SimpleInFile& f)
 bool VarReplacer::get_scc_depth_warning_triggered() const
 {
     return scc_finder->depth_warning_triggered();
-}
-
-void VarReplacer::extend_pop_queue(vector<Lit>& pop)
-{
-    vector<Lit> extra;
-    for (Lit p: pop) {
-        const auto& repl = reverseTable[p.var()];
-        for(uint32_t x: repl) {
-            extra.push_back(Lit(x, table[x].sign() ^ p.sign()));
-        }
-    }
-
-    for(Lit x: extra) {
-        pop.push_back(x);
-    }
 }

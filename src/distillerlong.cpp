@@ -33,8 +33,6 @@ using namespace CMSat;
 using std::cout;
 using std::endl;
 
-//#define DEBUG_STAMPING
-
 #ifdef VERBOSE_DEBUG
 #define VERBOSE_SUBSUME_NONEXIST
 #endif
@@ -59,12 +57,6 @@ bool DistillerLong::distill(const bool red, bool fullstats)
         }
         other = runStats;
     } else {
-        #ifdef FINAL_PREDICTOR
-        runStats.clear();
-        if (!distill_long_cls_all(solver->longRedCls[3], 10.0)) {
-            goto end;
-        }
-        #else
         runStats.clear();
         if (!distill_long_cls_all(solver->longRedCls[0], 10.0)) {
             goto end;
@@ -73,7 +65,6 @@ bool DistillerLong::distill(const bool red, bool fullstats)
         if (!distill_long_cls_all(solver->longRedCls[1], solver->conf.distill_red_tier1_ratio)) {
             goto end;
         }
-        #endif
     }
 
 end:
@@ -140,18 +131,18 @@ bool DistillerLong::go_through_clauses(
         ClOffset offset = *i;
         ClOffset offset2;
         Clause& cl = *solver->cl_alloc.ptr(offset);
-        #ifdef USE_GAUSS
-        if (cl.used_in_xor()) {
+        if (cl.used_in_xor() &&
+            solver->conf.force_preserve_xors
+        ) {
             offset2 = offset;
             goto copy;
         }
-        #endif
 
         //Time to dereference
         maxNumProps -= 5;
 
         //If we already tried this clause, then move to next
-        if (cl.getdistilled()) {
+        if (cl.getdistilled() || cl._xor_is_detached) {
             *j++ = *i;
             continue;
         }
@@ -166,7 +157,7 @@ bool DistillerLong::go_through_clauses(
         maxNumProps -= cl.size();
         if (solver->satisfied_cl(cl)) {
             solver->detachClause(cl);
-            solver->cl_alloc.clauseFree(&cl);
+            solver->free_cl(&cl);
             continue;
         }
 
@@ -177,9 +168,7 @@ bool DistillerLong::go_through_clauses(
             , cl.stats
         );
 
-        #ifdef USE_GAUSS
         copy:
-        #endif
         if (offset2 != CL_OFFSET_MAX) {
             *j++ = offset2;
         }
@@ -236,7 +225,7 @@ bool DistillerLong::distill_long_cls_all(
     const double time_remain = float_div(
         maxNumProps - ((int64_t)solver->propStats.bogoProps-(int64_t)oldBogoProps),
         orig_maxNumProps);
-    if (solver->conf.verbosity) {
+    if (solver->conf.verbosity >= 2) {
         cout << "c [distill] long cls"
         << " tried: " << runStats.checkedClauses << "/" << offs.size()
         << " cl-short:" << runStats.numClShorten
@@ -260,102 +249,6 @@ bool DistillerLong::distill_long_cls_all(
 
     return solver->okay();
 }
-
-/*ClOffset DistillerLong::try_distill_clause_and_return_new(
-    ClOffset offset
-    , const bool red
-    , const ClauseStats& stats
-) {
-    #ifdef DRAT_DEBUG
-    if (solver->conf.verbosity >= 6) {
-        cout << "Trying to distill clause:" << lits << endl;
-    }
-    #endif
-
-    Clause& cl = *solver->cl_alloc.ptr(offset);
-    lits.resize(cl.size());
-    std::copy(cl.begin(), cl.end(), lits.begin());
-
-    //Try to enqueue the literals in 'queueByBy' amounts and see if we fail
-    uint32_t new_sz = 0;
-    solver->new_decision_level();
-    bool early_abort = false;
-    for (size_t i = 0, sz = lits.size()-1; i < sz; i++) {
-        const Lit lit = lits[i];
-        lbool val = solver->value(lit);
-        if (val == l_Undef) {
-            solver->enqueue(~lit);
-            new_sz++;
-
-            maxNumProps -= 5;
-            if (!solver->propagate<true>().isNULL()) {
-                early_abort = true;
-                break;
-            }
-        } else if (val == l_False) {
-            //Record that there is no use for this literal
-            solver->seen[lit.toInt()] = 1;
-            //new_sz++;
-        } else {
-            //val is l_True --> can't do much
-            new_sz++;
-            early_abort = true;
-            break;
-        }
-    }
-    solver->cancelUntil<false, true>(0);
-    assert(solver->ok);
-    if (!early_abort) {
-        new_sz++;
-    }
-
-    if (new_sz < lits.size()) {
-        runStats.numClShorten++;
-        maxNumProps -= 20;
-        runStats.numLitsRem += lits.size() - new_sz;
-        if (solver->conf.verbosity >= 5) {
-            cout
-            << "c Distillation branch effective." << endl
-            << "c --> orig clause:" << *solver->cl_alloc.ptr(offset) << endl
-            << "c --> orig size:" << lits.size() << endl
-            << "c --> new size:" << new_sz << endl;
-        }
-
-        //Remove useless literals from 'lits'
-        vector<Lit>::iterator i = lits.begin();
-        vector<Lit>::iterator j = lits.begin();
-        for(vector<Lit>::iterator end = lits.end()
-            ; i != end
-            ; i++
-        ) {
-            if (solver->seen[i->toInt()] == 0) {
-                *j++ = *i;
-            } else {
-                //zero out 'seen'
-                solver->seen[i->toInt()] = 0;
-            }
-        }
-        lits.resize(new_sz);
-
-        //Make new clause
-        Clause *cl2 = solver->add_clause_int(lits, red, stats);
-
-        //Detach and free old clause
-        solver->detachClause(offset);
-        solver->cl_alloc.clauseFree(offset);
-
-        if (cl2 != NULL) {
-            cl2->set_distilled(true);
-            return solver->cl_alloc.get_offset(cl2);
-        } else {
-            //it became a bin/unit/zero
-            return CL_OFFSET_MAX;
-        }
-    } else {
-        //couldn't simplify the clause
-        return offset;
-    }
-}*/
 
 ClOffset DistillerLong::try_distill_clause_and_return_new(
     ClOffset offset
@@ -465,7 +358,7 @@ ClOffset DistillerLong::try_distill_clause_and_return_new(
         lits.resize(cl.size());
         std::copy(cl.begin(), cl.end(), lits.begin());
     }
-    solver->cl_alloc.clauseFree(offset);
+    solver->free_cl(offset);
     Clause *cl2 = solver->add_clause_int(lits, red, stats);
     (*solver->drat) << findelay;
 

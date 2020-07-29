@@ -49,6 +49,7 @@ void SolutionExtender::extend()
             //but everything else is NOT OK
             (solver->varData[v_inter].removed != Removed::none
                 && solver->varData[v_inter].removed != Removed::decomposed
+                && solver->varData[v_inter].removed != Removed::clashed
             )
             && solver->model[i] != l_Undef
         ) {
@@ -68,16 +69,12 @@ void SolutionExtender::extend()
         simplifier->extend_model(this);
     }
 
-    //cout << "aft simp unset       : " << count_num_unset_model() << endl;
-
     //clause has been added with "lit, ~lit" so var must be set
     for(size_t i = 0; i < solver->undef_must_set_vars.size(); i++) {
         if (solver->undef_must_set_vars[i]
             && solver->model_value(i) == l_Undef
         ) {
-            //any setting would work, let's set to l_False (MiniSat default)
             solver->model[i] = l_False;
-            solver->decisions_reaching_model.push_back(Lit(i, true));
         }
     }
 
@@ -95,6 +92,7 @@ inline bool SolutionExtender::satisfied(const vector< Lit >& lits) const
     return false;
 }
 
+//called with _outer_ variable in "blockedOn"
 void SolutionExtender::dummyBlocked(const uint32_t blockedOn)
 {
     #ifdef VERBOSE_DEBUG_SOLUTIONEXTENDER
@@ -113,9 +111,7 @@ void SolutionExtender::dummyBlocked(const uint32_t blockedOn)
     if (solver->model_value(blockedOn) != l_Undef)
         return;
 
-    //Picking l_False because MiniSat likes False solutions. Could pick anything.
     solver->model[blockedOn] = l_False;
-    solver->decisions_reaching_model.push_back(Lit(blockedOn, true));
 
     //If var is replacing something else, it MUST be set.
     if (solver->varReplacer->var_is_replacing(blockedOn)) {
@@ -137,10 +133,6 @@ bool SolutionExtender::addClause(const vector<Lit>& lits, const uint32_t blocked
     assert(solver->varData[blocked_on_inter].removed == Removed::elimed);
     assert(contains_var(lits, blockedOn));
     #endif
-
-    //Note: we need to do this even if solver->conf.greedy_undef is FALSE
-    //because the solution we are given (when used as a preprocessor)
-    //may not be full
 
     //Try to extend through setting variables that have been blocked but
     //were not required to be set until now
@@ -195,7 +187,6 @@ bool SolutionExtender::addClause(const vector<Lit>& lits, const uint32_t blocked
 
     //satisfy this one clause
     Lit actual_lit = lit_Undef;
-    bool all_values_false = true;
     for(Lit l: lits) {
         lbool model_value = solver-> model_value(l);
         assert(model_value != l_True);
@@ -203,19 +194,14 @@ bool SolutionExtender::addClause(const vector<Lit>& lits, const uint32_t blocked
             actual_lit = l;
         } else {
             if (model_value == l_Undef) {
-                all_values_false = false;
+            } else {
+                assert(model_value == l_False);
             }
         }
     }
     assert(actual_lit != lit_Undef);
     lbool val = actual_lit.sign() ? l_False : l_True;
     solver->model[blockedOn] = val;
-    if (!all_values_false) {
-        solver->decisions_reaching_model.push_back(Lit(blockedOn, val == l_False));
-        //cout << "Adding dec addClause: " << Lit(blockedOn, val == l_False) << endl;
-    } else {
-        //cout << "Would be forced anyway" << endl;
-    }
 
     if (solver->conf.verbosity >= 10) {
         cout << "Extending VELIM cls. -- setting model for var "
@@ -227,24 +213,4 @@ bool SolutionExtender::addClause(const vector<Lit>& lits, const uint32_t blocked
 
     //it's been set now
     return true;
-}
-
-size_t SolutionExtender::count_num_unset_model() const
-{
-    size_t num_unset = 0;
-    if (solver->conf.sampling_vars) {
-        for(size_t i = 0; i < solver->conf.sampling_vars->size(); i++) {
-            uint32_t var = (*solver->conf.sampling_vars)[i];
-            if (solver->model_value(var) == l_Undef) {
-                num_unset++;
-            }
-        }
-    } else {
-        for(size_t i = 0; i < solver->nVars(); i++) {
-            if (solver->model_value(i) == l_Undef) {
-                num_unset++;
-            }
-        }
-    }
-    return num_unset;
 }

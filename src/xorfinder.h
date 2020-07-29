@@ -60,6 +60,7 @@ class PossibleXor
             abst = _abst;
             size = cl.size();
             offsets.clear();
+            fully_used.clear();
             #ifdef VERBOSE_DEBUG_XOR_FINDER
             cout << "Trying to create XOR from clause: " << cl << endl;
             #endif
@@ -73,7 +74,10 @@ class PossibleXor
             }
             setup_seen_rhs_foundcomb(seen);
             if (offset != std::numeric_limits<ClOffset>::max()) {
+                //this is the XOR that starts it all
+                //so it's fully used
                 offsets.push_back(offset);
+                fully_used.push_back(true);
             }
         }
 
@@ -97,6 +101,11 @@ class PossibleXor
         const vector<ClOffset>& get_offsets() const
         {
             return offsets;
+        }
+
+        const vector<char>& get_fully_used() const
+        {
+            return fully_used;
         }
 
     private:
@@ -136,6 +145,7 @@ class PossibleXor
         uint32_t size;
         bool rhs;
         vector<ClOffset> offsets;
+        vector<char> fully_used;
 };
 
 class XorFinder
@@ -154,7 +164,6 @@ public:
 
         Stats& operator+=(const Stats& other);
         void print_short(const Solver* solver, const double time_remain) const;
-        void print() const;
 
         //Time
         uint32_t numCalls = 0;
@@ -171,13 +180,13 @@ public:
     const Stats& get_stats() const;
     size_t mem_used() const;
     void grab_mem();
-    void add_xors_to_solver();
     vector<Xor> remove_xors_without_connecting_vars(const vector<Xor>& this_xors);
     bool xor_together_xors(vector<Xor>& xors);
     bool add_new_truths_from_xors(vector<Xor>& xors, vector<Lit>* out_changed_occur = NULL);
     void clean_equivalent_xors(vector<Xor>& txors);
 
-    vector<Xor> xors;
+    vector<Xor>& xors;
+    vector<Xor>& unused_xors;
 
 private:
     PossibleXor poss_xor;
@@ -185,8 +194,12 @@ private:
     void find_xors_based_on_long_clauses();
     void print_found_xors();
     bool xor_has_interesting_var(const Xor& x);
-    vector<uint32_t> xor_two(Xor& x1, Xor& x2, uint32_t& clash_num);
-    void clean_xors_from_empty();
+    void clean_xors_from_empty(vector<Xor>& thisxors);
+
+    ///xor two -- don't re-allocate memory all the time
+    ///use tmp_vars_xor_two instead
+    uint32_t xor_two(Xor const* x1, Xor const* x2, uint32_t& clash_var);
+    vector<uint32_t> tmp_vars_xor_two;
 
     int64_t xor_find_time_limit;
 
@@ -211,6 +224,8 @@ private:
     //Other temporaries
     vector<uint32_t> occcnt;
     vector<Lit>& toClear;
+    vector<uint16_t>& seen;
+    vector<uint8_t>& seen2;
     vector<uint32_t> interesting;
 };
 
@@ -303,6 +318,7 @@ template<class T> void PossibleXor::add(
     }
     if (offset != std::numeric_limits<ClOffset>::max()) {
         offsets.push_back(offset);
+        fully_used.push_back(varsMissing.empty());
     }
 
     #ifdef VERBOSE_DEBUG_XOR_FINDER

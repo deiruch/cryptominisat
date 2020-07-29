@@ -96,8 +96,8 @@ struct Drat
     virtual void flush();
 
     int buf_len;
-    unsigned char* drup_buf = 0;
-    unsigned char* buf_ptr;
+    unsigned char* drup_buf = NULL;
+    unsigned char* buf_ptr = NULL;
 };
 
 template<bool add_ID>
@@ -227,9 +227,21 @@ struct DratFile: public Drat
     Drat& operator<<(const Lit lit) override
     {
         if (must_delete_next) {
+#ifdef DEBUG_DRAT
+            cout << "dLIT ";
+#endif
             byteDRUPd(lit);
+#ifdef DEBUG_DRAT
+            cout << endl;
+#endif
         } else {
+#ifdef DEBUG_DRAT
+            cout << "aLIT ";
+#endif
             byteDRUPa(lit);
+#ifdef DEBUG_DRAT
+            cout << endl;
+#endif
         }
 
         return *this;
@@ -243,6 +255,9 @@ struct DratFile: public Drat
 #endif
             for(const Lit l: cl)
                 byteDRUPd(l);
+#ifdef DEBUG_DRAT
+            cout << endl;
+#endif
         } else {
 #ifdef DEBUG_DRAT
             cout << "a ";
@@ -262,7 +277,8 @@ struct DratFile: public Drat
                 //assert(!(ID != 0 && !cl.red()));
 
                 //redundant clauses MUST have a valid ID
-                assert(!(ID == 0 && cl.red()));
+                //actually, they don't, in case they got merged
+                //assert(!(ID == 0 && cl.red()));
             }
             #endif
         }
@@ -283,7 +299,7 @@ struct DratFile: public Drat
 #endif
         } else {
 #ifdef DEBUG_DRAT
-            cout << "d ";
+            cout << "a ";
 #endif
             for(const Lit l: cl)
                 byteDRUPa(l);

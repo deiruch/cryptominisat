@@ -25,6 +25,7 @@ THE SOFTWARE.
 
 #include <string>
 #include <vector>
+#include "ccnr_mersenne.h"
 
 using std::vector;
 
@@ -69,41 +70,19 @@ struct variable {
     vector<int> neighbor_var_nums;
     long long score;
     long long last_flip_step;
-    int unsat_appear;
+    int unsat_appear; //how many unsat clauses it appears in
     bool cc_value;
     bool is_in_ccd_vars;
 };
 struct clause {
     vector<lit> literals;
-    int sat_count;
+    int sat_count; //no. of satisfied literals
     int sat_var;
     long long weight;
 };
 
 //---------------------------
 //functions in mersenne.h & mersenne.cpp
-
-class Mersenne
-{
-    static const int N = 624;
-    unsigned int mt[N];
-    int mti;
-
-   public:
-    Mersenne();         // seed with time-dependent value
-    Mersenne(int seed); // seed with int value; see comments for the seed() method
-    Mersenne(unsigned int *array, int count); // seed with array
-    Mersenne(const Mersenne &copy);
-    Mersenne &operator=(const Mersenne &copy);
-    void seed(int s);
-    void seed(unsigned int *array, int len);
-    unsigned int next32(); // generates random integer in [0..2^32-1]
-    int next31();          // generates random integer in [0..2^31-1]
-    double nextClosed();   // generates random float in [0..1], 2^53 possible values
-    double nextHalfOpen(); // generates random float in [0..1), 2^53 possible values
-    double nextOpen();     // generates random float in (0..1), 2^53 possible values
-    int next(int bound);   // generates random integer in [0..bound), bound < 2^31
-};
 
 class ls_solver
 {
@@ -130,9 +109,10 @@ class ls_solver
     int _num_clauses;
 
     //data structure used
-    vector<int> _unsat_clauses;
-    vector<int> _index_in_unsat_clauses;
-    vector<int> _unsat_vars;
+    vector<int> _conflict_ct;
+    vector<int> _unsat_clauses; // list of unsatisfied clauses
+    vector<int> _index_in_unsat_clauses; // _index_in_unsat_clauses[var] tells where "var" is in _unsat_vars
+    vector<int> _unsat_vars; // clauses are UNSAT due to these vars
     vector<int> _index_in_unsat_vars;
     vector<int> _ccd_vars;
 

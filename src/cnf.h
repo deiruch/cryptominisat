@@ -30,9 +30,7 @@ THE SOFTWARE.
 #include "vardata.h"
 #include "propby.h"
 #include "solverconf.h"
-#include "stamp.h"
 #include "solvertypes.h"
-#include "implcache.h"
 #include "watcharray.h"
 #include "drat.h"
 #include "clauseallocator.h"
@@ -46,6 +44,31 @@ using std::numeric_limits;
 namespace CMSat {
 
 class ClauseAllocator;
+
+struct AssumptionPair {
+    AssumptionPair()
+    {}
+
+    AssumptionPair(const Lit _outer, const Lit _outside):
+        lit_outer(_outer)
+        , lit_orig_outside(_outside)
+    {
+    }
+
+    Lit lit_outer;
+    Lit lit_orig_outside; //not outer, but outside(!)
+
+    bool operator==(const AssumptionPair& other) const {
+        return other.lit_outer == lit_outer &&
+        other.lit_orig_outside == lit_orig_outside;
+    }
+
+    bool operator<(const AssumptionPair& other) const
+    {
+        //Yes, we need reverse in terms of inverseness
+        return ~lit_outer < ~other.lit_outer;
+    }
+};
 
 struct BinTriStats
 {
@@ -63,9 +86,11 @@ class CNF
 {
 public:
     void save_on_var_memory();
+    void updateWatch(watch_subarray ws, const vector<uint32_t>& outerToInter);
     void updateVars(
         const vector<uint32_t>& outerToInter
         , const vector<uint32_t>& interToOuter
+        , const vector<uint32_t>& interToOuter2
     );
     size_t mem_used_renumberer() const;
     size_t mem_used() const;
@@ -78,7 +103,6 @@ public:
         drat = new Drat;
         assert(_must_interrupt_inter != NULL);
         must_interrupt_inter = _must_interrupt_inter;
-
         longRedCls.resize(3);
     }
 
@@ -96,18 +120,41 @@ public:
     #ifdef USE_GAUSS
     vec<vec<GaussWatched>> gwatches;
     uint32_t gqhead;
+    bool all_matrices_disabled = false;
     #endif
+    uint32_t num_sls_called = 0;
     vector<VarData> varData;
-    bool VSIDS = true;
-    vector<uint32_t> depth;
-    Stamp stamp;
-    ImplCache implCache;
+    branch branch_strategy = branch::vsids;
+    string branch_strategy_str = "VSIDSX";
+    string branch_strategy_str_short = "vsx";
+    PolarityMode polarity_mode = PolarityMode::polarmode_automatic; //current polarity mode
+    uint32_t polar_stable_longest_trail_this_iter = 0;
+    uint32_t longest_trail_ever = 0;
+    vector<uint32_t> depth; //for ancestors in intree probing
     uint32_t minNumVars = 0;
-    uint32_t sumConflicts = 0;
-    uint32_t latest_feature_calc = 0;
-    uint64_t last_feature_calc_confl = 0;
-    double maple_decay_base = 0.95;
+
+    uint64_t sumConflicts = 0;
+    uint64_t sumDecisions = 0;
+    uint64_t sumAntecedents = 0;
+    uint64_t sumPropagations = 0;
+    uint64_t sumConflictClauseLits = 0;
+    uint64_t sumAntecedentsLits = 0;
+    uint64_t sumDecisionBasedCl = 0;
+    uint64_t sumClLBD = 0;
+    uint64_t sumClSize = 0;
+
+    uint32_t latest_satzilla_feature_calc = 0;
+    uint64_t last_satzilla_feature_calc_confl = 0;
+    uint32_t latest_vardist_feature_calc = 0;
+    uint64_t last_vardist_feature_calc_confl = 0;
+
     unsigned  cur_max_temp_red_lev2_cls = conf.max_temp_lev2_learnt_clauses;
+
+    //Note that this array can have the same internal variable more than
+    //once, in case one has been replaced with the other. So if var 1 =  var 2
+    //and var 1 was set to TRUE and var 2 to be FALSE, then we'll have var 1
+    //insided this array twice, once it needs to be set to TRUE and once FALSE
+    vector<AssumptionPair> assumptions;
 
     //drat
     Drat* drat;
@@ -125,10 +172,16 @@ public:
     level 2 = check often
     **/
     vector<vector<ClOffset> > longRedCls;
+    vector<ClOffset> detached_xor_repr_cls; //these are still in longIrredCls
     vector<Xor> xorclauses;
+    vector<Xor> xorclauses_unused;
+    vector<uint32_t> removed_xorclauses_clash_vars;
+    bool detached_xor_clauses = false;
+    bool xor_clauses_updated = false;
     BinTriStats binTri;
     LitStats litStats;
     int64_t clauseID = 1;
+    int64_t restartID = 1;
 
     //Temporaries
     vector<uint16_t> seen;
@@ -251,6 +304,8 @@ public:
     {
         return num_bva_vars;
     }
+    vector<uint32_t> get_outside_var_incidence();
+    vector<uint32_t> get_outside_var_incidence_also_red();
 
     vector<uint32_t> build_outer_to_without_bva_map() const;
     void clean_occur_from_removed_clauses();
@@ -285,14 +340,9 @@ protected:
     virtual void new_var(const bool bva, const uint32_t orig_outer);
     virtual void new_vars(const size_t n);
     void test_reflectivity_of_renumbering() const;
-    vector<lbool> back_number_solution_from_inter_to_outer(const vector<lbool>& solution) const
-    {
-        vector<lbool> back_numbered = solution;
-        updateArrayRev(back_numbered, interToOuterMain);
-        return back_numbered;
-    }
 
-    vector<lbool> map_back_to_without_bva(const vector<lbool>& val) const;
+    template<class T>
+    vector<T> map_back_vars_to_without_bva(const vector<T>& val) const;
     vector<lbool> assigns;
 
     void save_state(SimpleOutFile& f) const;
@@ -547,12 +597,12 @@ bool CNF::no_duplicate_lits(const T& lits) const
 
 inline void CNF::check_no_duplicate_lits_anywhere() const
 {
-    for(ClOffset offs: longIrredCls) {
+    for(const ClOffset offs: longIrredCls) {
         Clause * cl = cl_alloc.ptr(offs);
         assert(no_duplicate_lits((*cl)));
     }
-    for(auto l: longRedCls) {
-        for(ClOffset offs: l) {
+    for(const auto& l: longRedCls) {
+        for(const ClOffset offs: l) {
             Clause * cl = cl_alloc.ptr(offs);
             assert(no_duplicate_lits((*cl)));
         }
@@ -619,6 +669,21 @@ void CNF::clean_xor_vars_no_prop(T& ps, bool& rhs)
         }
     }
     ps.resize(ps.size() - (i - j));
+}
+
+template<class T>
+vector<T> CNF::map_back_vars_to_without_bva(const vector<T>& val) const
+{
+    vector<T> ret;
+    assert(val.size() == nVarsOuter());
+    ret.reserve(nVarsOutside());
+    for(size_t i = 0; i < nVarsOuter(); i++) {
+        if (!varData[map_outer_to_inter(i)].is_bva) {
+            ret.push_back(val[i]);
+        }
+    }
+    assert(ret.size() == nVarsOutside());
+    return ret;
 }
 
 }

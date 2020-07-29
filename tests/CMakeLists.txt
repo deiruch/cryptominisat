@@ -18,6 +18,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
+if (NOT WIN32)
+    add_cxx_flag_if_supported("-Wno-sign-compare")
+endif()
+
 
 set (LIT_TOOL "${PYTHON_EXECUTABLE} -m lit.main")
 execute_process(
@@ -69,16 +73,16 @@ if(NOT ONLY_SIMPLE)
 
     # Needed for fuzz-testing
     add_subdirectory(${PROJECT_SOURCE_DIR}/utils/cnf-utils cnf-utils)
-    add_subdirectory(${PROJECT_SOURCE_DIR}/utils/drat-trim drat-trim)
     add_subdirectory(${PROJECT_SOURCE_DIR}/utils/sha1-sat sha1-sat)
     add_subdirectory(${PROJECT_SOURCE_DIR}/utils/minisat minisat)
 endif()
 
 add_sanitize_flags()
-if (PYTHON_EXECUTABLE AND ZLIB_FOUND AND NOT STATS_NEEDED AND NOT ONLY_SIMPLE)
-    add_subdirectory(${PROJECT_SOURCE_DIR}/utils/minisat_only_elim_and_subsume minisat_only_elim_and_subsume)
-    add_subdirectory(simp-checks)
-endif()
+# below is expensive tests, let's not run it
+# if (PYTHON_EXECUTABLE AND ZLIB_FOUND AND NOT STATS_NEEDED AND NOT ONLY_SIMPLE)
+#     add_subdirectory(${PROJECT_SOURCE_DIR}/utils/minisat_only_elim_and_subsume minisat_only_elim_and_subsume)
+#     add_subdirectory(simp-checks)
+# endif()
 
 
 include_directories(
@@ -157,7 +161,7 @@ if (IPASIR)
     )
 endif()
 
-#google test harness
+# unit tests
 set (MY_TESTS
 #     clause_alloc_test
     basic_test
@@ -168,7 +172,6 @@ set (MY_TESTS
     scc_test
     vrepl_test
     clause_cleaner_test
-    probe_test
     distiller_all_with_all_test
     distill_long_with_implicit_test
     subsume_impl_test
@@ -179,8 +182,10 @@ set (MY_TESTS
     dump_test
     searcher_test
     solver_test
+    cardfinder_test
     ternary_resolve_test
     implied_by_test
+    lucky_test
 #    undefine_test
 )
 

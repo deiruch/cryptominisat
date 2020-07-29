@@ -174,8 +174,13 @@ void ClauseCleaner::clean_clauses_inter(vector<ClOffset>& cs)
     cs.resize(cs.size() - (s-ss));
 }
 
-inline bool ClauseCleaner::clean_clause(Clause& cl)
+bool ClauseCleaner::clean_clause(Clause& cl)
 {
+    //Don't clean if detached. We'll deal with it during re-attach.
+    if (cl._xor_is_detached) {
+        return false;
+    }
+
     assert(cl.size() > 2);
     (*solver->drat) << deldelay << cl << fin;
 
@@ -212,6 +217,8 @@ inline bool ClauseCleaner::clean_clause(Clause& cl)
         solver->drat->forget_delay();
     }
 
+    assert(cl.size() != 0);
+    assert(cl.size() != 1);
     assert(cl.size() > 1);
     assert(solver->value(cl[0]) == l_Undef);
     assert(solver->value(cl[1]) == l_Undef);
@@ -265,7 +272,7 @@ void ClauseCleaner::clean_clauses_post()
 {
     solver->clean_occur_from_removed_clauses_only_smudged();
     for(ClOffset off: delayed_free) {
-        solver->cl_alloc.clauseFree(off);
+        solver->free_cl(off);
     }
     delayed_free.clear();
 }
@@ -291,7 +298,7 @@ void ClauseCleaner::remove_and_clean_all()
     //Once we have cleaned the watchlists
     //no watchlist whose lit is set may be non-empty
     size_t wsLit = 0;
-    for(watch_array::iterator
+    for(watch_array::const_iterator
         it = solver->watches.begin(), end = solver->watches.end()
         ; it != end
         ; ++it, wsLit++
@@ -311,10 +318,9 @@ void ClauseCleaner::remove_and_clean_all()
 
     if (solver->conf.verbosity >= 2) {
         cout
-        << "c [clean] T: "
-        << std::fixed << std::setprecision(4)
-        << (cpuTime() - myTime)
-        << " s" << endl;
+        << "c [clean]"
+        << solver->conf.print_times(cpuTime() - myTime)
+        << endl;
     }
 }
 
@@ -370,6 +376,7 @@ bool ClauseCleaner::clean_xor_clauses(vector<Xor>& xors)
         size_t j = 0;
         for(size_t size = xors.size(); i < size; i++) {
             Xor& x = xors[i];
+            //cout << "Checking to keep xor: " << x << endl;
             const bool keep = clean_one_xor(x);
             if (!solver->ok) {
                 return false;
@@ -377,6 +384,13 @@ bool ClauseCleaner::clean_xor_clauses(vector<Xor>& xors)
 
             if (keep) {
                 xors[j++] = x;
+            } else {
+                solver->removed_xorclauses_clash_vars.insert(
+                    solver->removed_xorclauses_clash_vars.end()
+                    , x.clash_vars.begin()
+                    , x.clash_vars.end()
+                );
+                //cout << "NOT keeping XOR" << endl;
             }
         }
         xors.resize(j);
@@ -388,4 +402,38 @@ bool ClauseCleaner::clean_xor_clauses(vector<Xor>& xors)
         #endif
     }
     return solver->okay();
+}
+
+//returns TRUE if removed or solver is UNSAT
+bool ClauseCleaner::full_clean(Clause& cl)
+{
+    Lit *i = cl.begin();
+    Lit *j = i;
+    for (Lit *end = cl.end(); i != end; i++) {
+        if (solver->value(*i) == l_True) {
+            return true;
+        }
+
+        if (solver->value(*i) == l_Undef) {
+            *j++ = *i;
+        }
+    }
+    cl.shrink(i-j);
+
+    if (cl.size() == 0) {
+        solver->ok = false;
+        return true;
+    }
+
+    if (cl.size() == 1) {
+        solver->enqueue(cl[0]);
+        return true;
+    }
+
+    if (cl.size() == 2) {
+        solver->attach_bin_clause(cl[0], cl[1], cl.red());
+        return true;
+    }
+
+    return false;
 }

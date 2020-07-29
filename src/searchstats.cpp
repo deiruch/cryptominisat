@@ -36,10 +36,6 @@ SearchStats& SearchStats::operator+=(const SearchStats& other)
     decisionsRand += other.decisionsRand;
     decisionFlippedPolar += other.decisionFlippedPolar;
 
-    //LSIDS-data
-    lsids_opp_cached += other.lsids_opp_cached;
-    chrono_decisions += other.chrono_decisions;
-
     //Conflict minimisation stats
     litsRedNonMin += other.litsRedNonMin;
     litsRedFinal += other.litsRedFinal;
@@ -52,13 +48,9 @@ SearchStats& SearchStats::operator+=(const SearchStats& other)
 
     furtherShrinkAttempt  += other.furtherShrinkAttempt;
     binTriShrinkedClause += other.binTriShrinkedClause;
-    cacheShrinkedClause += other.cacheShrinkedClause;
     furtherShrinkedSuccess += other.furtherShrinkedSuccess;
 
 
-    stampShrinkAttempt += other.stampShrinkAttempt;
-    stampShrinkCl += other.stampShrinkCl;
-    stampShrinkLit += other.stampShrinkLit;
     moreMinimLitsStart += other.moreMinimLitsStart;
     moreMinimLitsEnd += other.moreMinimLitsEnd;
     recMinimCost += other.recMinimCost;
@@ -67,7 +59,11 @@ SearchStats& SearchStats::operator+=(const SearchStats& other)
     learntUnits += other.learntUnits;
     learntBins += other.learntBins;
     learntLongs += other.learntLongs;
-    cache_hit += other.cache_hit;
+    otfSubsumed += other.otfSubsumed;
+    otfSubsumedImplicit += other.otfSubsumedImplicit;
+    otfSubsumedLong += other.otfSubsumedLong;
+    otfSubsumedRed += other.otfSubsumedRed;
+    otfSubsumedLitsGained += other.otfSubsumedLitsGained;
     red_cl_in_which0 += other.red_cl_in_which0;
 
     //Hyper-bin & transitive reduction
@@ -110,12 +106,8 @@ SearchStats& SearchStats::operator-=(const SearchStats& other)
 
     furtherShrinkAttempt  -= other.furtherShrinkAttempt;
     binTriShrinkedClause -= other.binTriShrinkedClause;
-    cacheShrinkedClause -= other.cacheShrinkedClause;
     furtherShrinkedSuccess -= other.furtherShrinkedSuccess;
 
-    stampShrinkAttempt -= other.stampShrinkAttempt;
-    stampShrinkCl -= other.stampShrinkCl;
-    stampShrinkLit -= other.stampShrinkLit;
     moreMinimLitsStart -= other.moreMinimLitsStart;
     moreMinimLitsEnd -= other.moreMinimLitsEnd;
     recMinimCost -= other.recMinimCost;
@@ -124,7 +116,11 @@ SearchStats& SearchStats::operator-=(const SearchStats& other)
     learntUnits -= other.learntUnits;
     learntBins -= other.learntBins;
     learntLongs -= other.learntLongs;
-    cache_hit -= other.cache_hit;
+    otfSubsumed -= other.otfSubsumed;
+    otfSubsumedImplicit -= other.otfSubsumedImplicit;
+    otfSubsumedLong -= other.otfSubsumedLong;
+    otfSubsumedRed -= other.otfSubsumedRed;
+    otfSubsumedLitsGained -= other.otfSubsumedLitsGained;
     red_cl_in_which0 -= other.red_cl_in_which0;
 
     //Hyper-bin & transitive reduction
@@ -171,7 +167,10 @@ void SearchStats::printCommon(uint64_t props, bool do_print_times) const
         , "% random"
     );
 
-    print_stats_line("c propagations", props);
+    print_stats_line("c propagations"
+                     , print_value_kilo_mega(props, false)
+                     , print_value_kilo_mega(ratio_for_stat(props, cpu_time), false),
+                     "props/s");
 
     print_stats_line("c decisions/conflicts"
         , float_div(decisions, conflStats.numConflicts)
@@ -192,12 +191,6 @@ void SearchStats::print_short(uint64_t props, bool do_print_times) const
 
     print_stats_line("c conf lits final"
         , float_div(litsRedFinal, conflStats.numConflicts)
-    );
-
-    print_stats_line("c cache hit re-learnt cl"
-        , cache_hit
-        , stats_line_percent(cache_hit, conflStats.numConflicts)
-        , "% of confl"
     );
 
     print_stats_line("c red which0"
@@ -230,12 +223,6 @@ void SearchStats::print(uint64_t props, bool do_print_times) const
         , learntLongs
         , stats_line_percent(learntLongs, conflStats.numConflicts)
         , "% of conflicts"
-    );
-
-    print_stats_line("c cache hit re-learnt cl"
-        , cache_hit
-        , stats_line_percent(cache_hit, conflStats.numConflicts)
-        , "% of confl"
     );
 
     print_stats_line("c red which0"
@@ -305,24 +292,6 @@ void SearchStats::print(uint64_t props, bool do_print_times) const
     print_stats_line("c bintri-min lits"
         , binTriShrinkedClause
         , stats_line_percent(binTriShrinkedClause, litsRedNonMin)
-        , "% less overall"
-    );
-
-    print_stats_line("c cache-min lits"
-        , cacheShrinkedClause
-        , stats_line_percent(cacheShrinkedClause, litsRedNonMin)
-        , "% less overall"
-    );
-
-    print_stats_line("c stamp-min call%"
-        , stats_line_percent(stampShrinkAttempt, conflStats.numConflicts)
-        , stats_line_percent(stampShrinkCl, stampShrinkAttempt)
-        , "% attempt successful"
-    );
-
-    print_stats_line("c stamp-min lits"
-        , stampShrinkLit
-        , stats_line_percent(stampShrinkLit, litsRedNonMin)
         , "% less overall"
     );
 
