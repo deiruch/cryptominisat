@@ -62,12 +62,7 @@ public:
 
     void printVersionInfo()
     {
-        cout << "c CryptoMiniSat version " << solver->get_version() << endl;
-        #ifdef __GNUC__
-        cout << "c CryptoMiniSat compiled with gcc version " << __VERSION__ << endl;
-        #else
-        cout << "c CryptoMiniSat compiled with non-gcc compiler" << endl;
-        #endif
+        cout << solver->get_text_version_info() << endl;
     }
 
     void printUsage(const char** argv)
@@ -108,7 +103,7 @@ public:
                     exit(0);
                 }
                 conf.verbosity = verbosity;
-            }else if ((value = hasPrefix(argv[i], "--dratsim="))){
+            }else if ((value = hasPrefix(argv[i], "--simdrat="))){
                 int drat_sim  = (int)strtol(value, NULL, 10);
                 conf.simulate_drat = drat_sim;
             }else if ((value = hasPrefix(argv[i], "--threads="))){
@@ -137,12 +132,15 @@ public:
                 conf.reconfigure_val = reconf;
             }else if (strcmp(argv[i], "--zero-exit-status") == 0){
                 zero_exit_status = true;
+            }else if (strcmp(argv[i], "--version") == 0){
+                printVersionInfo();
+                exit(0);
             } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "-help") == 0 || strcmp(argv[i], "--help") == 0){
                 printUsage(argv);
                 exit(0);
 
             }else if (strncmp(argv[i], "-", 1) == 0){
-                cout << "ERROR! unknown flag" << argv[i] << endl;
+                cout << "ERROR! unknown flag: " << argv[i] << endl;
                 exit(0);
 
             }else
@@ -177,10 +175,10 @@ public:
             cout << "Reading from standard input... Use '-h' or '--help' for help.\n";
             #ifndef USE_ZLIB
             FILE* in = stdin;
-            DimacsParser<StreamBuffer<FILE*, FN> > parser(solver, NULL, conf.verbosity);
+            DimacsParser<StreamBuffer<FILE*, FN>, SATSolver> parser(solver, NULL, conf.verbosity);
             #else
             gzFile in = gzdopen(0, "rb"); //opens stdin, which is 0
-            DimacsParser<StreamBuffer<gzFile, GZ> > parser(solver, NULL, conf.verbosity);
+            DimacsParser<StreamBuffer<gzFile, GZ>, SATSolver> parser(solver, NULL, conf.verbosity);
             #endif
 
             if (!parser.parse_DIMACS(in, false)) {
@@ -207,9 +205,9 @@ public:
             }
 
             #ifndef USE_ZLIB
-            DimacsParser<StreamBuffer<FILE*, FN> > parser(solver, NULL, conf.verbosity);
+            DimacsParser<StreamBuffer<FILE*, FN>, SATSolver> parser(solver, NULL, conf.verbosity);
             #else
-            DimacsParser<StreamBuffer<gzFile, GZ> > parser(solver, NULL, conf.verbosity);
+            DimacsParser<StreamBuffer<gzFile, GZ>, SATSolver> parser(solver, NULL, conf.verbosity);
             #endif
 
             if (!parser.parse_DIMACS(in, false)) {

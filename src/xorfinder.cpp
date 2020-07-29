@@ -26,6 +26,7 @@ THE SOFTWARE.
 #include "occsimplifier.h"
 #include "clauseallocator.h"
 #include "sqlstats.h"
+#include "varreplacer.h"
 
 #include <limits>
 //#define XOR_DEBUG
@@ -35,10 +36,15 @@ using std::cout;
 using std::endl;
 
 XorFinder::XorFinder(OccSimplifier* _occsimplifier, Solver* _solver) :
-    occsimplifier(_occsimplifier)
+    xors(_solver->xorclauses)
+    , unused_xors(_solver->xorclauses_unused)
+    , occsimplifier(_occsimplifier)
     , solver(_solver)
     , toClear(_solver->toClear)
+    , seen(_solver->seen)
+    , seen2(_solver->seen2)
 {
+    tmp_vars_xor_two.reserve(2000);
 }
 
 void XorFinder::find_xors_based_on_long_clauses()
@@ -59,7 +65,7 @@ void XorFinder::find_xors_based_on_long_clauses()
         xor_find_time_limit -= 1;
 
         //Already freed
-        if (cl->freed() || cl->getRemoved()) {
+        if (cl->freed() || cl->getRemoved() || cl->red()) {
             continue;
         }
 
@@ -97,6 +103,7 @@ void XorFinder::find_xors_based_on_long_clauses()
 void XorFinder::clean_equivalent_xors(vector<Xor>& txors)
 {
     if (!txors.empty()) {
+        size_t orig_size = txors.size();
         for(Xor& x: txors) {
             std::sort(x.begin(), x.end());
         }
@@ -107,13 +114,22 @@ void XorFinder::clean_equivalent_xors(vector<Xor>& txors)
         i++;
         uint64_t size = 1;
         for(vector<Xor>::iterator end = txors.end(); i != end; i++) {
-            if (*j != *i) {
+            if (j->vars == i->vars && i->rhs == j->rhs) {
+                j->merge_clash(*i, seen);
+                j->detached |= i->detached;
+            } else {
                 j++;
                 *j = *i;
                 size++;
             }
         }
         txors.resize(size);
+
+        if (solver->conf.verbosity) {
+            cout << "c [xor-clean-equiv] removed equivalent xors: "
+            << (orig_size-txors.size()) << " left with: " << txors.size()
+            << endl;
+        }
     }
 }
 
@@ -131,7 +147,19 @@ void XorFinder::find_xors()
         solver->conf.maxXorToFind = solver->conf.xor_var_per_cut + 2;
     }
 
+    //Clear flags. This is super-important.
+    for(auto& offs: occsimplifier->clauses) {
+        Clause* cl = solver->cl_alloc.ptr(offs);
+        if (cl->getRemoved() || cl->freed()) {
+            continue;
+        }
+
+        cl->set_used_in_xor(false);
+        cl->set_used_in_xor_full(false);
+    }
     xors.clear();
+    unused_xors.clear();
+
     double myTime = cpuTime();
     const int64_t orig_xor_find_time_limit =
         1000LL*1000LL*solver->conf.xor_finder_time_limitM
@@ -182,6 +210,15 @@ void XorFinder::find_xors()
             , time_remain
         );
     }
+    solver->xor_clauses_updated = true;
+
+    #if defined(SLOW_DEBUG) || defined(XOR_DEBUG)
+    for(const Xor& x: xors) {
+        for(uint32_t v: x) {
+            assert(solver->varData[v].removed == Removed::none);
+        }
+    }
+    #endif
 }
 
 void XorFinder::print_found_xors()
@@ -195,19 +232,8 @@ void XorFinder::print_found_xors()
         ) {
             cout << "c " << *it << endl;
         }
+        cout << "c -> Total: " << xors.size() << " xors" << endl;
     }
-}
-
-void XorFinder::add_xors_to_solver()
-{
-    solver->xorclauses = xors;
-    #if defined(SLOW_DEBUG) || defined(XOR_DEBUG)
-    for(const Xor& x: xors) {
-        for(uint32_t v: x) {
-            assert(solver->varData[v].removed == Removed::none);
-        }
-    }
-    #endif
 }
 
 void XorFinder::findXor(vector<Lit>& lits, const ClOffset offset, cl_abst_type abst)
@@ -246,7 +272,7 @@ void XorFinder::findXor(vector<Lit>& lits, const ClOffset offset, cl_abst_type a
 
     if (poss_xor.foundAll()) {
         std::sort(lits.begin(), lits.end());
-        Xor found_xor(lits, poss_xor.getRHS());
+        Xor found_xor(lits, poss_xor.getRHS(), vector<uint32_t>());
         #if defined(SLOW_DEBUG) || defined(XOR_DEBUG)
         for(Lit lit: lits) {
             assert(solver->varData[lit.var()].removed == Removed::none);
@@ -254,10 +280,15 @@ void XorFinder::findXor(vector<Lit>& lits, const ClOffset offset, cl_abst_type a
         #endif
 
         add_found_xor(found_xor);
-        for(ClOffset offs: poss_xor.get_offsets()) {
+        assert(poss_xor.get_fully_used().size() == poss_xor.get_offsets().size());
+        for(uint32_t i = 0; i < poss_xor.get_offsets().size() ; i++) {
+            ClOffset offs = poss_xor.get_offsets()[i];
+            bool fully_used = poss_xor.get_fully_used()[i];
+
             Clause* cl = solver->cl_alloc.ptr(offs);
             assert(!cl->getRemoved());
             cl->set_used_in_xor(true);
+            cl->set_used_in_xor_full(fully_used);
         }
     }
     poss_xor.clear_seen(occcnt);
@@ -285,6 +316,11 @@ void XorFinder::findXorMatch(watch_subarray_const occ, const Lit wlit)
             #ifdef SLOW_DEBUG
             assert(occcnt[wlit.var()]);
             #endif
+
+            if (w.red()) {
+                continue;
+            }
+
             if (!occcnt[w.lit2().var()]) {
                 goto end;
             }
@@ -316,7 +352,7 @@ void XorFinder::findXorMatch(watch_subarray_const occ, const Lit wlit)
             xor_find_time_limit -= 3;
             const ClOffset offset = w.get_offset();
             Clause& cl = *solver->cl_alloc.ptr(offset);
-            if (cl.freed() || cl.getRemoved()) {
+            if (cl.freed() || cl.getRemoved() || cl.red()) {
                 //Clauses are ordered!!
                 break;
             }
@@ -369,32 +405,6 @@ void XorFinder::findXorMatch(watch_subarray_const occ, const Lit wlit)
         }
         end:;
     }
-
-    if (solver->conf.doCache &&
-        solver->conf.useCacheWhenFindingXors &&
-        !poss_xor.foundAll()
-    ) {
-        const TransCache& cache1 = solver->implCache[wlit];
-        for (const LitExtra litExtra: cache1.lits) {
-            const Lit otherlit = litExtra.getLit();
-            if (!occcnt[otherlit.var()]) {
-                continue;
-            }
-
-            binvec.clear();
-            binvec.resize(2);
-            binvec[0] = otherlit;
-            binvec[1] = wlit;
-            if (binvec[0] > binvec[1]) {
-                std::swap(binvec[0], binvec[1]);
-            }
-
-            xor_find_time_limit -= 1;
-            poss_xor.add(binvec, std::numeric_limits<ClOffset>::max(), varsMissing);
-            if (poss_xor.foundAll())
-                break;
-        }
-    }
 }
 
 vector<Xor> XorFinder::remove_xors_without_connecting_vars(const vector<Xor>& this_xors)
@@ -406,7 +416,7 @@ vector<Xor> XorFinder::remove_xors_without_connecting_vars(const vector<Xor>& th
     vector<Xor> ret;
     assert(toClear.empty());
 
-    //Fill seen with vars used
+    //Fill "seen" with vars used
     uint32_t non_empty = 0;
     for(const Xor& x: this_xors) {
         if (x.size() != 0) {
@@ -424,16 +434,22 @@ vector<Xor> XorFinder::remove_xors_without_connecting_vars(const vector<Xor>& th
         }
     }
 
-    vector<Xor>::const_iterator i = this_xors.begin();
-    for(vector<Xor>::const_iterator end = this_xors.end()
-        ; i != end
-        ; i++
-    ) {
-        if (xor_has_interesting_var(*i)) {
-            ret.push_back(*i);
+    //has at least 1 var with occur of 2
+    for(const Xor& x: this_xors) {
+        if (xor_has_interesting_var(x) || x.detached) {
+            #ifdef VERBOSE_DEBUG
+            cout << "XOR has connecting var: " << x << endl;
+            #endif
+            ret.push_back(x);
+        } else {
+            #ifdef VERBOSE_DEBUG
+            cout << "XOR has no connecting var: " << x << endl;
+            #endif
+            unused_xors.push_back(x);
         }
     }
 
+    //clear "seen"
     for(Lit l: toClear) {
         solver->seen[l.var()] = 0;
     }
@@ -471,6 +487,13 @@ bool XorFinder::xor_together_xors(vector<Xor>& this_xors)
     }
     #endif
 
+    if (solver->conf.verbosity >= 5) {
+        cout << "c XOR-ing together XORs. Starting with: " << endl;
+        for(const auto& x: this_xors) {
+            cout << "c XOR before xor-ing together: " << x << endl;
+        }
+    }
+
     assert(solver->okay());
     assert(solver->decisionLevel() == 0);
     assert(solver->watches.get_smudged_list().empty());
@@ -496,13 +519,57 @@ bool XorFinder::xor_together_xors(vector<Xor>& this_xors)
         }
     }
 
+    //Don't XOR together over the sampling vars
+    //or variables that are in regular clauses
+    vector<uint32_t> to_clear_2;
+    if (solver->conf.sampling_vars) {
+        for(uint32_t outside_var: *solver->conf.sampling_vars) {
+            uint32_t outer_var = solver->map_to_with_bva(outside_var);
+            outer_var = solver->varReplacer->get_var_replaced_with_outer(outer_var);
+            uint32_t int_var = solver->map_outer_to_inter(outer_var);
+            if (int_var < solver->nVars()) {
+                if (!seen2[int_var]) {
+                    seen2[int_var] = 1;
+                    to_clear_2.push_back(int_var);
+                    //cout << "sampling var: " << int_var+1 << endl;
+                }
+            }
+        }
+    }
+
+    for(const auto& ws: solver->watches) {
+        for(const auto& w: ws) {
+            if (w.isBin() && !w.red()) {
+                uint32_t v = w.lit2().var();
+                if (!seen2[v]) {
+                    seen2[v] = 1;
+                    to_clear_2.push_back(v);
+                }
+            }
+        }
+    }
+
+    for(const auto& offs: solver->longIrredCls) {
+        Clause* cl = solver->cl_alloc.ptr(offs);
+        if (cl->red() || cl->used_in_xor()) {
+            continue;
+        }
+        for(Lit l: *cl) {
+            if (!seen2[l.var()]) {
+                seen2[l.var()] = 1;
+                to_clear_2.push_back(l.var());
+                //cout << "Not XORing together over var: " << l.var()+1 << endl;
+            }
+        }
+    }
+
     //until fixedpoint
     bool changed = true;
     while(changed) {
         changed = false;
         interesting.clear();
         for(const Lit l: toClear) {
-            if (occcnt[l.var()] == 2) {
+            if (occcnt[l.var()] == 2 && !seen2[l.var()]) {
                 interesting.push_back(l.var());
             }
         }
@@ -524,6 +591,7 @@ bool XorFinder::xor_together_xors(vector<Xor>& this_xors)
             }
             #endif
 
+            //Pop and check if it can be XOR-ed together
             const uint32_t v = interesting.back();
             interesting.resize(interesting.size()-1);
             if (occcnt[v] != 2)
@@ -535,11 +603,12 @@ bool XorFinder::xor_together_xors(vector<Xor>& this_xors)
             assert(solver->watches.size() > Lit(v, false).toInt());
             watch_subarray ws = solver->watches[Lit(v, false)];
 
+            //Remove the 2 indexes from the watchlist
             for(size_t i = 0; i < ws.size(); i++) {
                 const Watched& w = ws[i];
                 if (!w.isIdx()) {
                     ws[i2++] = ws[i];
-                } else if (this_xors[w.get_idx()] != Xor()) {
+                } else if (!this_xors[w.get_idx()].empty()) {
                     assert(at < 2);
                     idxes[at] = w.get_idx();
                     at++;
@@ -548,41 +617,69 @@ bool XorFinder::xor_together_xors(vector<Xor>& this_xors)
             assert(at == 2);
             ws.resize(i2);
 
-            if (this_xors[idxes[0]] == this_xors[idxes[1]]) {
+            Xor& x0 = this_xors[idxes[0]];
+            Xor& x1 = this_xors[idxes[1]];
+            uint32_t clash_var;
+            uint32_t clash_num = xor_two(&x0, &x1, clash_var);
+
+            //If they are equivalent
+            if (x0.size() == x1.size()
+                && x0.rhs == x1.rhs
+                && clash_num == x0.size()
+            ) {
+                #ifdef VERBOSE_DEBUG
+                cout << "x1: " << x0 << " -- at idx: " << idxes[0] << endl;
+                cout << "x2: " << x1 << " -- at idx: " << idxes[1] << endl;
+                cout << "equivalent. " << endl;
+                #endif
+
+                //Update clash values & detached values
+                x1.merge_clash(x0, seen);
+                x1.detached |= x0.detached;
+
+                #ifdef VERBOSE_DEBUG
+                cout << "after merge: " << x1 <<  " -- at idx: " << idxes[1] << endl;
+                #endif
+
                 //Equivalent, so delete one
-                this_xors[idxes[0]] = Xor();
+                x0 = Xor();
 
                 //Re-attach the other, remove the occur of the one we deleted
-                const Xor& x = this_xors[idxes[1]];
                 solver->watches[Lit(v, false)].push(Watched(idxes[1]));
-                for(uint32_t v2: x) {
+
+                for(uint32_t v2: x1) {
                     Lit l(v2, false);
                     assert(occcnt[l.var()] >= 2);
                     occcnt[l.var()]--;
-                    if (occcnt[l.var()] == 2) {
+                    if (occcnt[l.var()] == 2 && !seen2[l.var()]) {
                         interesting.push_back(l.var());
                     }
                 }
+            } else if (clash_num > 1 || x0.detached || x1.detached) {
+                //add back to ws, can't do much
+                ws.push(Watched(idxes[0]));
+                ws.push(Watched(idxes[1]));
+                continue;
             } else {
-                uint32_t clash_num;
-                vector<uint32_t> vars = xor_two(this_xors[idxes[0]], this_xors[idxes[1]], clash_num);
-                if (clash_num > 1) {
-                    //add back to ws
-                    ws.push(Watched(idxes[0]));
-                    ws.push(Watched(idxes[1]));
-                    continue;
-                }
                 occcnt[v] -= 2;
                 assert(occcnt[v] == 0);
 
-                Xor x_new(vars, this_xors[idxes[0]].rhs ^ this_xors[idxes[1]].rhs);
+                Xor x_new(tmp_vars_xor_two, x0.rhs ^ x1.rhs, clash_var);
+                x_new.merge_clash(x0, seen);
+                x_new.merge_clash(x1, seen);
+                #ifdef VERBOSE_DEBUG
+                cout << "x1: " << x0 << " -- at idx: " << idxes[0] << endl;
+                cout << "x2: " << x1 << " -- at idx: " << idxes[1] << endl;
+                cout << "clashed on var: " << clash_var+1 << endl;
+                cout << "final: " << x_new <<  " -- at idx: " << this_xors.size() << endl;
+                #endif
                 changed = true;
                 this_xors.push_back(x_new);
                 for(uint32_t v2: x_new) {
                     Lit l(v2, false);
                     solver->watches[l].push(Watched(this_xors.size()-1));
                     assert(occcnt[l.var()] >= 1);
-                    if (occcnt[l.var()] == 2) {
+                    if (occcnt[l.var()] == 2 && !seen2[l.var()]) {
                         interesting.push_back(l.var());
                     }
                 }
@@ -593,18 +690,33 @@ bool XorFinder::xor_together_xors(vector<Xor>& this_xors)
         }
     }
 
+    if (solver->conf.verbosity >= 5) {
+        cout << "c Finished XOR-ing together XORs. " << endl;
+        size_t at = 0;
+        for(const auto& x: this_xors) {
+            cout << "c XOR after xor-ing together: " << x << " -- at idx: " << at << endl;
+            at++;
+        }
+    }
+
     for(const Lit l: toClear) {
         occcnt[l.var()] = 0;
     }
     toClear.clear();
 
+    //Clear seen2
+    for(const auto& x: to_clear_2) {
+        seen2[x] = 0;
+    }
+
     solver->clean_occur_from_idx_types_only_smudged();
-    clean_xors_from_empty();
+    clean_xors_from_empty(this_xors);
     double recur_time = cpuTime() - myTime;
         if (solver->conf.verbosity) {
         cout
-        << "c [xor-together] xored together " << xored << " xors"
-        << " orig num xors: " << origsize
+        << "c [xor-together] xored together: " << xored
+        << " orig xors: " << origsize
+        << " new xors: " << this_xors.size()
         << solver->conf.print_times(recur_time)
         << endl;
     }
@@ -645,21 +757,25 @@ bool XorFinder::xor_together_xors(vector<Xor>& this_xors)
     return solver->okay();
 }
 
-void XorFinder::clean_xors_from_empty()
+void XorFinder::clean_xors_from_empty(vector<Xor>& thisxors)
 {
-    size_t i2 = 0;
-    for(size_t i = 0;i < xors.size(); i++) {
-        Xor& x = xors[i];
+    size_t j = 0;
+    for(size_t i = 0;i < thisxors.size(); i++) {
+        Xor& x = thisxors[i];
         if (x.size() == 0
             && x.rhs == false
         ) {
-            //nothing, skip
+            if (!x.clash_vars.empty()) {
+                unused_xors.push_back(x);
+            }
         } else {
-            xors[i2] = xors[i];
-            i2++;
+            if (solver->conf.verbosity >= 4) {
+                cout << "c xor after clean: " << thisxors[i] << endl;
+            }
+            thisxors[j++] = thisxors[i];
         }
     }
-    xors.resize(i2);
+    thisxors.resize(j);
 }
 
 bool XorFinder::add_new_truths_from_xors(vector<Xor>& this_xors, vector<Lit>* out_changed_occur)
@@ -762,48 +878,77 @@ bool XorFinder::add_new_truths_from_xors(vector<Xor>& this_xors, vector<Lit>* ou
     return solver->okay();
 }
 
-vector<uint32_t> XorFinder::xor_two(Xor& x1, Xor& x2, uint32_t& clash_num)
+uint32_t XorFinder::xor_two(Xor const* x1_p, Xor const* x2_p, uint32_t& clash_var)
 {
-    clash_num = 0;
-    x1.sort();
-    x2.sort();
-    vector<uint32_t> ret;
-    size_t x1_at = 0;
-    size_t x2_at = 0;
-    while(x1_at < x1.size() || x2_at < x2.size()) {
-        if (x1_at == x1.size()) {
-            ret.push_back(x2[x2_at]);
-            x2_at++;
-            continue;
-        }
+    tmp_vars_xor_two.clear();
+    if (x1_p->size() > x2_p->size()) {
+        std::swap(x1_p, x2_p);
+    }
+    const Xor& x1 = *x1_p;
+    const Xor& x2 = *x2_p;
 
-        if (x2_at == x2.size()) {
-            ret.push_back(x1[x1_at]);
-            x1_at++;
-            continue;
-        }
+    uint32_t clash_num = 0;
+    for(uint32_t v: x1) {
+        assert(seen[v] == 0);
+        seen[v] = 1;
+    }
 
-        const uint32_t a = x1[x1_at];
-        const uint32_t b = x2[x2_at];
-        if (a == b) {
-            clash_num++;
-            x1_at++;
-            x2_at++;
-            continue;
-        }
-
-        if (a < b) {
-            ret.push_back(a);
-            x1_at++;
-            continue;
+    uint32_t i_x2;
+    bool early_abort = false;
+    for(i_x2 = 0; i_x2 < x2.size(); i_x2++) {
+        uint32_t v = x2[i_x2];
+        assert(seen[v] != 2);
+        if (seen[v] == 0) {
+            tmp_vars_xor_two.push_back(v);
         } else {
-            ret.push_back(b);
-            x2_at++;
-            continue;
+            clash_var = v;
+            if (clash_num > 0 &&
+                clash_num != i_x2 //not equivalent by chance
+            ) {
+                //early abort, it's never gonna be good
+                clash_num++;
+                early_abort = true;
+                break;
+            }
+            clash_num++;
+        }
+        seen[v] = 2;
+    }
+
+    if (!early_abort) {
+        #ifdef SLOW_DEBUG
+        uint32_t other_clash = 0;
+        #endif
+        for(uint32_t v: x1) {
+            if (seen[v] != 2) {
+                tmp_vars_xor_two.push_back(v);
+            } else {
+                #ifdef SLOW_DEBUG
+                other_clash++;
+                #endif
+            }
+            seen[v] = 0;
+        }
+        #ifdef SLOW_DEBUG
+        assert(other_clash == clash_num);
+        #endif
+    } else {
+        for(uint32_t v: x1) {
+            seen[v] = 0;
         }
     }
 
-    return ret;
+    for(uint32_t i = 0; i < i_x2; i++) {
+        seen[x2[i]] = 0;
+    }
+
+    #ifdef SLOW_DEBUG
+    for(uint32_t v: x1) {
+        assert(seen[v] == 0);
+    }
+    #endif
+
+    return clash_num;
 }
 
 bool XorFinder::xor_has_interesting_var(const Xor& x)
@@ -851,26 +996,6 @@ void XorFinder::Stats::print_short(const Solver* solver, double time_remain) con
     cout
     << solver->conf.print_times(findTime, time_outs, time_remain)
     << endl;
-}
-
-void XorFinder::Stats::print() const
-{
-    cout << "c --------- XOR STATS ----------" << endl;
-    print_stats_line("c num XOR found on avg"
-        , float_div(foundXors, numCalls)
-        , "avg size"
-    );
-
-    print_stats_line("c XOR avg size"
-        , float_div(sumSizeXors, foundXors)
-    );
-
-    print_stats_line("c XOR finding time"
-        , findTime
-        , float_div(time_outs, numCalls)*100.0
-        , "time-out"
-    );
-    cout << "c --------- XOR STATS END ----------" << endl;
 }
 
 XorFinder::Stats& XorFinder::Stats::operator+=(const XorFinder::Stats& other)

@@ -23,9 +23,9 @@ THE SOFTWARE.
 #ifndef __SQLSTATS_H__
 #define __SQLSTATS_H__
 
-#include "clauseusagestats.h"
-#include "solvefeatures.h"
+#include "satzilla_features.h"
 #include "searchstats.h"
+#include "vardata.h"
 
 namespace CMSat {
 
@@ -37,15 +37,10 @@ class SQLStats
 {
 public:
 
-    virtual ~SQLStats();
+    virtual ~SQLStats() {}
 
-    virtual void restart(
-        const std::string& restart_type
-        , const PropStats& thisPropStats
-        , const SearchStats& thisStats
-        , const Solver* solver
-        , const Searcher* searcher
-    ) = 0;
+    virtual void end_transaction() = 0;
+    virtual void begin_transaction() = 0;
 
     virtual void time_passed(
         const Solver* solver
@@ -61,12 +56,6 @@ public:
         , double time_passed
     ) = 0;
 
-    virtual void features(
-        const Solver* solver
-        , const Searcher* search
-        , const SolveFeatures& feat
-    ) = 0;
-
     virtual void mem_used(
         const Solver* solver
         , const string& name
@@ -74,16 +63,73 @@ public:
         , uint64_t mem_used_mb
     ) = 0;
 
+    virtual void satzilla_features(
+        const Solver* solver
+        , const Searcher* search
+        , const SatZillaFeatures& satzilla_feat
+    ) = 0;
+
+    #ifdef STATS_NEEDED
+    virtual void restart(
+        const uint32_t restartID
+        , const Restart rest_type
+        , const PropStats& thisPropStats
+        , const SearchStats& thisStats
+        , const Solver* solver
+        , const Searcher* searcher
+        , const rst_dat_type type
+        , const int64_t clauseID = -1
+    ) = 0;
+
     virtual void reduceDB(
         const Solver* solver
         , const bool locked
         , const Clause* cl
+        , const string& cur_restart_type
+        , const uint32_t act_ranking_top_10
+        , const uint32_t act_ranking
+        , const uint32_t tot_cls_in_db
+    ) = 0;
+
+    #ifdef STATS_NEEDED_BRANCH
+    virtual void var_data_picktime(
+        const Solver* solver
+        , const uint32_t var
+        , const VarData& vardata
+        , const double rel_activity
+    ) = 0;
+
+    virtual void var_data_fintime(
+        const Solver* solver
+        , const uint32_t var
+        , const VarData& vardata
+        , const double rel_activity
+    ) = 0;
+
+    virtual void dec_var_clid(
+        const uint32_t var
+        , const uint64_t sumConflicts_at_picktime
+        , const uint64_t clid
+    ) = 0;
+
+    virtual void var_dist(
+        const uint32_t var
+        , const VarData2& data
+        , const Solver* solver
+    ) = 0;
+    #endif
+
+    virtual void cl_last_in_solver(
+        const Solver* solver
+        , const uint64_t clid
     ) = 0;
 
     virtual void dump_clause_stats(
         const Solver* solver
-        , uint64_t clauseID
-        , uint32_t glue
+        , uint64_t clid
+        , uint64_t restartID
+        , uint32_t orig_glue
+        , uint32_t glue_before_minim
         , uint32_t backtrack_level
         , uint32_t size
         , AtecedentData<uint16_t> resoltypes
@@ -92,24 +138,13 @@ public:
         , uint64_t conflicts_this_restart
         , const std::string& rest_type
         , const SearchHist& hist
-        , const double last_dec_var_act_0
-        , const double last_dec_var_act_1
-        , const double first_dec_var_act_0
-        , const double first_dec_var_act_1
+        , const bool is_decision
     ) = 0;
+    #endif
 
     virtual bool setup(const Solver* solver) = 0;
     virtual void finishup(lbool status) = 0;
-    uint64_t get_runID() const
-    {
-        return runID;
-    }
     virtual void add_tag(const std::pair<std::string, std::string>& tag) = 0;
-
-protected:
-
-    void getRandomID();
-    unsigned long runID;
 };
 
 } //end namespace

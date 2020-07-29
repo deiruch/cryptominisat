@@ -161,9 +161,12 @@ bool CompHandler::handle()
         return solver->okay();
     }
 
+
+    solver->removed_xorclauses_clash_vars.clear();
     solver->xorclauses.clear();
+    solver->xorclauses_unused.clear();
     #ifdef USE_GAUSS
-    solver->clearEnGaussMatrixes();
+    solver->clear_gauss_matrices();
     #endif
     map<uint32_t, vector<uint32_t> > reverseTable = compFinder->getReverseTable();
     assert(num_comps == compFinder->getReverseTable().size());
@@ -398,21 +401,10 @@ SolverConf CompHandler::configureNewSolver(
     conf.sampling_vars = NULL;
     if (numVars < 60) {
         conf.do_simplify_problem = false;
-        conf.doStamp = false;
-        conf.doCache = false;
-        conf.doProbe = false;
-        conf.otfHyperbin = false;
+        conf.doIntreeProbe = false;
+        conf.do_hyperbin_and_transred = false;
         conf.verbosity = std::min(solver->conf.verbosity, 0);
     }
-
-    //Otherwise issues are:
-    // * variable elimination assumes some of these variables are set
-    //   (in orig instance)
-    //
-    // * every var replaced with var replacement would need to be set anyway
-    //
-    // Let's not complicate all of this.
-    conf.greedy_undef = false;
 
     //To small, don't clogger up the screen
     if (numVars < 20 && solver->conf.verbosity < 3) {
@@ -485,7 +477,7 @@ void CompHandler::moveClausesLong(
             //In both comps, remove it
             if (thisComp && otherComp) {
                 solver->detachClause(cl);
-                solver->cl_alloc.clauseFree(&cl);
+                solver->free_cl(&cl);
                 continue;
             }
 
@@ -511,7 +503,7 @@ void CompHandler::moveClausesLong(
 
         //Add 'tmp' to the new solver
         if (cl.red()) {
-            #ifdef STATS_NEEDED
+            #if defined(STATS_NEEDED) || defined(FINAL_PREDICTOR)
             cl.stats.introduced_at_conflict = 0;
             #endif
             //newSolver->addRedClause(tmp, cl.stats);
@@ -522,7 +514,7 @@ void CompHandler::moveClausesLong(
 
         //Remove from here
         solver->detachClause(cl);
-        solver->cl_alloc.clauseFree(&cl);
+        solver->free_cl(&cl);
     }
     cs.resize(cs.size() - (i-j));
 }
@@ -640,7 +632,7 @@ void CompHandler::moveClausesImplicit(
     solver->binTri.redBins -= numRemovedHalfRed/2;
 }
 
-void CompHandler::addSavedState(vector<lbool>& solution, vector<Lit>& decisions)
+void CompHandler::addSavedState(vector<lbool>& solution)
 {
     //Enqueue them. They may need to be extended, so enqueue is needed
     //manipulating "model" may not be good enough
@@ -654,7 +646,6 @@ void CompHandler::addSavedState(vector<lbool>& solution, vector<Lit>& decisions)
             const lbool val = savedState[var];
             assert(solution[var] == l_Undef);
             solution[var] = val;
-            decisions.push_back(Lit(var, val == l_False));
             //cout << "Solution to var " << var + 1 << " has been added: " << val << endl;
 
             solver->varData[interVar].polarity = (val == l_True);

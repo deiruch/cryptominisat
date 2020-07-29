@@ -22,7 +22,7 @@ THE SOFTWARE.
 
 #include "matrixfinder.h"
 #include "solver.h"
-#include "EGaussian.h"
+#include "gaussian.h"
 #include "clausecleaner.h"
 #include "time_mem.h"
 #include "sqlstats.h"
@@ -44,6 +44,7 @@ using std::map;
 
 MatrixFinder::MatrixFinder(Solver* _solver) :
     solver(_solver)
+    , seen(_solver->seen)
 {
 }
 
@@ -94,24 +95,35 @@ inline bool MatrixFinder::belong_same_matrix(const Xor& x)
     return true;
 }
 
-bool MatrixFinder::findMatrixes(bool simplify_xors)
+bool MatrixFinder::findMatrixes(bool& can_detach, bool simplify_xors)
 {
     assert(solver->decisionLevel() == 0);
     assert(solver->ok);
-    assert(solver->gmatrixes.empty());
+    assert(solver->gmatrices.empty());
+    can_detach = true;
 
     table.clear();
     table.resize(solver->nVars(), var_Undef);
     reverseTable.clear();
+    xors.clear();
+    unused_xors.clear();
+    clash_vars_unused.clear();
     matrix_no = 0;
     double myTime = cpuTime();
-    XorFinder finder(NULL, solver);
+    for(const Xor& x: solver->xorclauses_unused) {
+        xors.push_back(x);
+    }
+    for(const Xor& x: solver->xorclauses) {
+        xors.push_back(x);
+    }
+    solver->xorclauses.clear();
+    solver->xorclauses_unused.clear();
 
+    XorFinder finder(NULL, solver);
     if (simplify_xors) {
-        if (!solver->clauseCleaner->clean_xor_clauses(solver->xorclauses)) {
+        if (!solver->clauseCleaner->clean_xor_clauses(xors)) {
             return false;
         }
-        xors = solver->xorclauses;
 
         finder.grab_mem();
         xors = finder.remove_xors_without_connecting_vars(xors);
@@ -119,37 +131,45 @@ bool MatrixFinder::findMatrixes(bool simplify_xors)
             return false;
 
         xors = finder.remove_xors_without_connecting_vars(xors);
-    } else {
-        xors = solver->xorclauses;
     }
     finder.clean_equivalent_xors(xors);
 
-    if (xors.size() < solver->conf.gaussconf.min_gauss_xor_clauses
-        || solver->conf.gaussconf.decision_until <= 0
-    ) {
-        if (solver->conf.verbosity >= 2)
-            cout << "c [matrix] too few xor clauses:" << xors.size() << endl;
+    if (solver->conf.verbosity >= 1) {
+        cout << "c [matrix] unused xors from cleaning: " << finder.unused_xors.size() << endl;
+    }
+
+    for(const auto& x: finder.unused_xors) {
+        unused_xors.push_back(x);
+        clash_vars_unused.insert(x.clash_vars.begin(), x.clash_vars.end());
+    }
+
+    if (xors.size() < solver->conf.gaussconf.min_gauss_xor_clauses) {
+        can_detach = false;
+        if (solver->conf.verbosity >= 4)
+            cout << "c [matrix] too few xor clauses for GJ: " << xors.size() << endl;
 
         return true;
     }
 
     if (xors.size() > solver->conf.gaussconf.max_gauss_xor_clauses
-        && solver->conf.sampling_vars->size() > 0
+        && solver->conf.sampling_vars != NULL
     ) {
+        can_detach = false;
         if (solver->conf.verbosity) {
             cout << "c WARNING sampling vars have been given but there"
             "are too many XORs and it would take too much time to put them"
-            "into matrixes. Skipping!" << endl;
+            "into matrices. Skipping!" << endl;
             return true;
         }
     }
 
+    //Just one giant matrix.
     if (!solver->conf.gaussconf.doMatrixFind) {
         if (solver->conf.verbosity >=1) {
             cout << "c Matrix finding disabled through switch. Putting all xors into matrix." << endl;
         }
-        solver->gmatrixes.push_back(new EGaussian(solver, solver->conf.gaussconf, 0, xors));
-        solver->gqueuedata.resize(solver->gmatrixes.size());
+        solver->gmatrices.push_back(new EGaussian(solver, 0, xors));
+        solver->gqueuedata.resize(solver->gmatrices.size());
         return true;
     }
 
@@ -210,8 +230,8 @@ bool MatrixFinder::findMatrixes(bool simplify_xors)
     const bool time_out =  false;
     const double time_used = cpuTime() - myTime;
     if (solver->conf.verbosity) {
-        cout << "c Found matrixes: " << numMatrixes
-        << " from " << xors.size() << " xors"
+        cout << "c [matrix] Using " << numMatrixes
+        << " matrices recoverd from " << xors.size() << " xors"
         << solver->conf.print_times(time_used, time_out)
         << endl;
     }
@@ -233,7 +253,7 @@ uint32_t MatrixFinder::setMatrixes()
         if (solver->conf.gaussconf.max_matrix_rows < size_at_least) {
             solver->conf.gaussconf.max_matrix_rows = size_at_least;
             if (solver->conf.verbosity) {
-                cout << "c [matrixfind] incrementing max number of rows to "
+                cout << "c [matrix] incrementing max number of rows to "
                 << size_at_least
                 << endl;
             }
@@ -259,6 +279,7 @@ uint32_t MatrixFinder::setMatrixes()
         matrix_shape[matrix].sum_xor_sizes += x.size();
         xorsInMatrix[matrix].push_back(x);
     }
+    xors.clear();
 
     for(auto& m: matrix_shape) {
         if (m.tot_size() > 0) {
@@ -270,6 +291,8 @@ uint32_t MatrixFinder::setMatrixes()
 
     uint32_t realMatrixNum = 0;
     uint32_t unusedMatrix = 0;
+    uint32_t too_few_rows_matrix = 0;
+    uint32_t unused_matrix_printed = 0;
     for (int a = matrix_no-1; a >= 0; a--) {
         MatrixShape& m = matrix_shape[a];
         uint32_t i = m.num;
@@ -277,34 +300,46 @@ uint32_t MatrixFinder::setMatrixes()
             continue;
         }
 
-        //cout << "small check" << endl;
-        if (m.rows < solver->conf.gaussconf.min_matrix_rows
-            || m.rows > solver->conf.gaussconf.max_matrix_rows
-        ) {
-            if (m.rows > solver->conf.gaussconf.max_matrix_rows
-                && solver->conf.verbosity
-            ) {
-                cout << "c [matrix] Too many rows in matrix: " << m.rows << endl;
+        bool use_matrix = true;
+
+
+        //Over- or undersized
+        if (m.rows > solver->conf.gaussconf.max_matrix_rows) {
+            use_matrix = false;
+            if (solver->conf.verbosity) {
+                cout << "c [matrix] Too many rows in matrix: " << m.rows
+                << " -> set usage to NO" << endl;
             }
-            continue;
+        }
+
+        if (m.rows < solver->conf.gaussconf.min_matrix_rows) {
+            use_matrix = false;
+            too_few_rows_matrix++;
+            if (solver->conf.verbosity >= 2) {
+                cout << "c [matrix] Too few rows in matrix: " << m.rows
+                << " -> set usage to NO" << endl;
+            }
         }
 
         //calculate sampling var ratio
         //for statistics ONLY
-        double ratio_sampling = 0;
+        double ratio_sampling;
         if (solver->conf.sampling_vars) {
-            uint32_t sampling_var_inside_matrix = 0;
-
             //'seen' with what is in Matrix
             for(uint32_t int_var: reverseTable[i]) {
-                solver->seen[int_var] = true;
+                solver->seen[int_var] = 1;
             }
 
+            uint32_t tot_sampling_vars  = 0;
+            uint32_t sampling_var_inside_matrix = 0;
             for(uint32_t outside_var: *solver->conf.sampling_vars) {
                 uint32_t outer_var = solver->map_to_with_bva(outside_var);
                 outer_var = solver->varReplacer->get_var_replaced_with_outer(outer_var);
                 uint32_t int_var = solver->map_outer_to_inter(outer_var);
-                if (int_var < solver->nVars()
+                tot_sampling_vars++;
+                if (solver->value(int_var) != l_Undef) {
+                    sampling_var_inside_matrix++;
+                } else if (int_var < solver->nVars()
                     && solver->seen[int_var]
                 ) {
                     sampling_var_inside_matrix++;
@@ -313,62 +348,125 @@ uint32_t MatrixFinder::setMatrixes()
 
             //Clear 'seen'
             for(uint32_t int_var: reverseTable[i]) {
-                solver->seen[int_var] = false;
+                solver->seen[int_var] = 0;
             }
 
-            ratio_sampling = (double)sampling_var_inside_matrix/(double)reverseTable[i].size();
+            ratio_sampling =
+                (double)sampling_var_inside_matrix/(double)tot_sampling_vars;
         }
 
+        //Over the max number of matrixes
+        if (realMatrixNum >= solver->conf.gaussconf.max_num_matrices) {
+            if (solver->conf.verbosity && solver->conf.verbosity >= 2) {
+                cout << "c [matrix] above max number of matrixes -> set usage to NO" << endl;
+            }
+            use_matrix = false;
+        }
 
-        bool use_matrix = false;
+        //Override in case sampling vars ratio is high
         if (solver->conf.sampling_vars) {
-            if (ratio_sampling > 1.0) { //TODO Magic constant
+            if (solver->conf.verbosity) {
+                cout << "c [matrix] ratio_sampling: " << ratio_sampling << endl;
+            }
+            if (ratio_sampling >= 0.6) { //TODO Magic constant
+                if (solver->conf.verbosity) {
+                    cout << "c [matrix] sampling ratio good -> set usage to YES" << endl;
+                }
                 use_matrix = true;
+            } else {
+                if (solver->conf.verbosity) {
+                    cout << "c [matrix] sampling ratio bad -> set usage to NO" << endl;
+                }
+                use_matrix = false;
             }
         }
 
-        if (realMatrixNum <= solver->conf.gaussconf.max_num_matrixes) {
+        //if already detached, we MUST use the matrix
+        for(const auto& x: xorsInMatrix[i]) {
+            if (x.detached) {
+                use_matrix = true;
+                if (solver->conf.verbosity) {
+                    cout << "c we MUST use the matrix, it contains a previously detached XOR"
+                    << " -> set usage to YES" << endl;
+                }
+                break;
+            }
+        }
+
+        if (solver->conf.force_use_all_matrixes) {
             use_matrix = true;
+            if (solver->conf.verbosity) {
+                cout << "c solver configured to force use all matrixes"
+                << " -> set usage to YES" << endl;
+            }
         }
 
         if (use_matrix) {
-            solver->gmatrixes.push_back(
-                new EGaussian(solver, solver->conf.gaussconf, realMatrixNum, xorsInMatrix[i]));
-            solver->gqueuedata.resize(solver->gmatrixes.size());
+            solver->gmatrices.push_back(
+                new EGaussian(solver, realMatrixNum, xorsInMatrix[i]));
+            solver->gqueuedata.resize(solver->gmatrices.size());
 
             if (solver->conf.verbosity) {
                 cout << "c [matrix] Good   matrix " << std::setw(2) << realMatrixNum;
             }
             realMatrixNum++;
+            assert(solver->gmatrices.size() == realMatrixNum);
+            for(const auto& x: xorsInMatrix[i]) {
+                xors.push_back(x);
+            }
         } else {
-            if (solver->conf.verbosity >= 3) {
-                cout << "c [matrix] UNused matrix   ";
+            for(const auto& x: xorsInMatrix[i]) {
+                unused_xors.push_back(x);
+                //cout<< "c [matrix]xor not in matrix, now unused_xors size: " << unused_xors.size() << endl;
+                clash_vars_unused.insert(x.clash_vars.begin(), x.clash_vars.end());
+            }
+            if (solver->conf.verbosity && unused_matrix_printed < 10) {
+                if (m.rows >= solver->conf.gaussconf.min_matrix_rows ||
+                    solver->conf.verbosity >= 2)
+                {
+                    cout << "c [matrix] UNused matrix   ";
+                }
             }
             unusedMatrix++;
         }
 
         if (solver->conf.verbosity) {
             double avg = (double)m.sum_xor_sizes/(double)m.rows;
-
-            if (!use_matrix && solver->conf.verbosity < 3)
+            if (!solver->conf.verbosity)
                 continue;
+
+            if (!use_matrix &&
+                    ((m.rows < solver->conf.gaussconf.min_matrix_rows &&
+                    solver->conf.verbosity < 2) ||
+                    (unused_matrix_printed >= 10))
+                )
+            {
+                continue;
+            }
+
+            if (!use_matrix) {
+                unused_matrix_printed++;
+            }
 
             cout << std::setw(7) << m.rows << " x"
             << std::setw(5) << reverseTable[i].size()
             << "  density:"
-            << std::setw(5) << std::fixed << std::setprecision(1) << m.density << "%"
+            << std::setw(5) << std::fixed << std::setprecision(4) << m.density
             << "  xorlen avg: "
-            << std::setw(5) << std::fixed << std::setprecision(2)  << avg
-            << "  perc sampl: "
-            << std::setw(5) << std::fixed << std::setprecision(3) << ratio_sampling*100.0 << " %"
-            << endl;
+            << std::setw(5) << std::fixed << std::setprecision(2)  << avg;
+            if (solver->conf.sampling_vars) {
+                cout << "  perc of sampl vars: "
+                << std::setw(5) << std::fixed << std::setprecision(3)
+                << ratio_sampling*100.0 << " %";
+            }
+            cout  << endl;
         }
     }
 
     if (solver->conf.verbosity && unusedMatrix > 0) {
-        cout << "c [matrix] unused matrixes: " << unusedMatrix << endl;
+        cout << "c [matrix] unused matrices: " << unusedMatrix
+        <<  " of which too few rows: " << too_few_rows_matrix << endl;
     }
 
     return realMatrixNum;
 }
-

@@ -18,9 +18,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-include_directories(
-    ${PROJECT_SOURCE_DIR}
-)
+include_directories( ${PROJECT_SOURCE_DIR} )
+include_directories( ${BOSPHORUS_INCLUDE_DIRS} )
 
 if (NOT WIN32)
     add_cxx_flag_if_supported("-Wno-bitfield-constant-conversion")
@@ -29,18 +28,22 @@ if (NOT WIN32)
     add_cxx_flag_if_supported("-Wlogical-op")
     add_cxx_flag_if_supported("-Wrestrict")
     add_cxx_flag_if_supported("-Wnull-dereference")
-    add_cxx_flag_if_supported("-Wjump-misses-init")
     add_cxx_flag_if_supported("-Wdouble-promotion")
     add_cxx_flag_if_supported("-Wshadow")
     add_cxx_flag_if_supported("-Wformat=2")
     add_cxx_flag_if_supported("-Wextra-semi")
     add_cxx_flag_if_supported("-pedantic")
-    add_cxx_flag_if_supported("-Wno-class-memaccess")
     #add_cxx_flag_if_supported("-Wdeprecated")
+
+    if (FINAL_PREDICTOR)
+    add_cxx_flag_if_supported("-Wno-unused-parameter")
+    add_cxx_flag_if_supported("-Wno-unused-but-set-variable")
+    endif()
 endif()
 add_sanitize_flags()
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 if(Boost_FOUND)
     include_directories(${Boost_INCLUDE_DIRS})
@@ -57,7 +60,7 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cryptominisat.h.in" "${CMAKE_CURRENT
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/solvertypesmini.h.in" "${CMAKE_CURRENT_BINARY_DIR}/cryptominisat5/solvertypesmini.h" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cryptominisat_c.h.in" "${CMAKE_CURRENT_BINARY_DIR}/cryptominisat5/cryptominisat_c.h" @ONLY)
 
-if (SQLITE3_FOUND AND STATS)
+if (SQLITE3_FOUND)
     if (NOT PYTHON_EXECUTABLE)
         MESSAGE(FATAL_ERROR "Unfortunately, the python interpreter is needed for statistics because of SQL text generation")
     endif()
@@ -77,8 +80,6 @@ set(cryptoms_lib_files
     propengine.cpp
     varreplacer.cpp
     clausecleaner.cpp
-    clauseusagestats.cpp
-    prober.cpp
     occsimplifier.cpp
     subsumestrengthen.cpp
     clauseallocator.cpp
@@ -86,14 +87,11 @@ set(cryptoms_lib_files
     solverconf.cpp
     distillerlong.cpp
     distillerlongwithimpl.cpp
-    str_impl_w_impl_stamp.cpp
+    str_impl_w_impl.cpp
     solutionextender.cpp
     completedetachreattacher.cpp
     searcher.cpp
     solver.cpp
-    sqlstats.cpp
-    implcache.cpp
-    stamp.cpp
     compfinder.cpp
     comphandler.cpp
     hyperengine.cpp
@@ -103,31 +101,50 @@ set(cryptoms_lib_files
     clausedumper.cpp
     bva.cpp
     intree.cpp
-    features_calc.cpp
-    features_to_reconf.cpp
-    solvefeatures.cpp
+    satzilla_features_calc.cpp
+    satzilla_features_to_reconf.cpp
+    satzilla_features.cpp
     searchstats.cpp
     xorfinder.cpp
+    cardfinder.cpp
     cryptominisat_c.cpp
     yalsat.cpp
     yals.c
     walksat.cpp
+    sls.cpp
+    vardistgen.cpp
     ccnr.cpp
     ccnr_cms.cpp
-    sls.cpp
-
+    lucky.cpp
 #    watcharray.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/GitSHA1.cpp
 )
 
 set(cryptoms_lib_link_libs "")
 
+if (FINAL_PREDICTOR)
+
+    set(cryptoms_lib_files
+        ${cryptoms_lib_files}
+#         predict/clustering_imp.cpp
+        cl_predictors.cpp
+    )
+    SET(cryptoms_lib_link_libs ${cryptoms_lib_link_libs} xgboost dmlc rabit rt)
+endif()
+
 if (USE_GAUSS)
     SET(cryptoms_lib_files ${cryptoms_lib_files}
-        EGaussian.cpp
+        gaussian.cpp
         packedrow.cpp
         matrixfinder.cpp
     )
+endif()
+
+if (MPI_FOUND)
+    SET(cryptoms_lib_files ${cryptoms_lib_files}
+        datasyncserver.cpp
+    )
+    SET(cryptoms_lib_link_libs ${cryptoms_lib_link_libs} ${MPI_CXX_LIBRARIES})
 endif()
 
 if (M4RI_FOUND)
@@ -137,7 +154,21 @@ if (M4RI_FOUND)
     SET(cryptoms_lib_link_libs ${cryptoms_lib_link_libs} ${M4RI_LIBRARIES})
 endif (M4RI_FOUND)
 
-if (SQLITE3_FOUND AND STATS)
+if (BOSPHORUS_LIBRARIES)
+    include_directories( ${BOSPHORUS_INCLUDE_DIRS} )
+
+    SET(cryptoms_lib_files ${cryptoms_lib_files} cms_bosphorus.cpp)
+    SET(cryptoms_lib_link_libs ${cryptoms_lib_link_libs} ${BOSPHORUS_LIBRARIES})
+endif()
+
+if (BREAKID_LIBRARIES)
+    include_directories( ${BREAKID_INCLUDE_DIRS} )
+
+    SET(cryptoms_lib_files ${cryptoms_lib_files} cms_breakid.cpp)
+    SET(cryptoms_lib_link_libs ${cryptoms_lib_link_libs} ${BREAKID_LIBRARIES})
+endif()
+
+if (SQLITE3_FOUND)
     SET(cryptoms_lib_files ${cryptoms_lib_files}
         sqlitestats.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/sql_tablestructure.cpp
@@ -327,8 +358,8 @@ if (NOT ONLY_SIMPLE)
         RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}
         INSTALL_RPATH_USE_LINK_PATH TRUE)
     target_link_libraries(cryptominisat5-bin
+        ${Boost_LIBRARIES}
         ${cryptoms_exec_link_libs}
-        "${Boost_LIBRARIES}"
     )
     install(TARGETS cryptominisat5-bin
         # EXPORT ${CRYPTOMINISAT5_EXPORT_NAME}

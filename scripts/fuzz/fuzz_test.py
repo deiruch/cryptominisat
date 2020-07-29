@@ -75,15 +75,12 @@ def set_up_parser():
     parser.add_option("--fuzzlim", dest="fuzz_test_lim", type=int,
                       help="Number of fuzz tests to run"
                       )
-    parser.add_option("--novalgrind", dest="novalgrind", default=False,
-                      action="store_true", help="No valgrind installed")
+    parser.add_option("--dovalgrind", dest="novalgrind", default=True,
+                      action="store_false", help="Use valgrind installed -- NOT recommended, compile with SANTIZE instead!")
+
     parser.add_option("--valgrindfreq", dest="valgrind_freq", type=int,
                       default=10, help="1 out of X times valgrind will be used. Default: %default in 1")
 
-    parser.add_option("--small", dest="small", default=False,
-                      action="store_true",
-                      help="Don't run 'large' fuzzer"
-                      " (may mem-out on smaller systems)")
     parser.add_option("--gauss", dest="gauss", default=False,
                       action="store_true",
                       help="Concentrate fuzzing gauss")
@@ -110,6 +107,10 @@ def set_up_parser():
     parser.add_option("--textra", dest="maxtimediff", type=int, default=10,
                       help="Extra time on top of timeout for processing."
                       " Default: %default")
+
+    parser.add_option("--rate", dest="rate", default=False,
+                      action="store_true",
+                      help="Use the 'rate' DRAT checker")
     return parser
 
 
@@ -211,14 +212,13 @@ class Tester:
     def __init__(self):
         self.ignoreNoSolution = False
         self.extra_opts_supported = self.list_options_if_supported(
-            ["xor", "autodisablegauss", "sql", "clid"])
+            ["xor", "autodisablegauss", "sql", "clid", "breakid"])
         self.sol_parser = solution_parser(options)
         self.sqlitedbfname = None
         self.clid_added = False
         self.only_sampling = False
         self.sampling_vars = []
         self.dump_red = None
-        self.decisions_dumpfile = None
         self.this_gauss_on = False
         self.num_threads = 1
         self.preproc = False
@@ -262,24 +262,25 @@ class Tester:
 
         # just so that XOR is really found and used, so we can fuzz it
         if "autodisablegauss" in self.extra_opts_supported:
-            if random.choice([False, True, True, True]) and self.this_gauss_on:
-                sched.append("occ-xor")
+            sched.append("occ-xor")
 
         if options.sls:
+            sched.append("sls")
+        elif random.randint(0,10) < 3:
             sched.append("sls")
 
         return sched
 
     def rnd_schedule_all(self, preproc):
         sched_opts = "handle-comps,"
-        sched_opts += "scc-vrepl, cache-clean, cache-tryboth,"
-        sched_opts += "sub-impl, intree-probe, probe,"
+        sched_opts += "scc-vrepl,"
+        sched_opts += "sub-impl, intree-probe,"
         sched_opts += "sub-str-cls-with-bin, distill-cls, scc-vrepl, sub-impl,"
         sched_opts += "sub-cls-with-bin,"
-        sched_opts += "str-impl, cache-clean, sub-str-cls-with-bin, distill-cls, scc-vrepl,"
+        sched_opts += "str-impl, sub-str-cls-with-bin, distill-cls, scc-vrepl,"
         sched_opts += "occ-backw-sub-str, occ-xor, occ-clean-implicit, occ-bve, occ-bva,"
-        sched_opts += "check-cache-size, renumber, must-renumber"
-        sched_opts += ", sls"
+        sched_opts += "renumber, must-renumber,"
+        sched_opts += "sls, card-find, breakid"
 
         # type of schedule
         cmd = ""
@@ -299,32 +300,57 @@ class Tester:
         self.sqlitedbfname = None
         self.clid_added = False
         cmd = " --zero-exit-status "
-        if self.decisions_dumpfile is None and not preproc:
-            self.decisions_dumpfile = unique_file("fuzz-decdump", ".txt")
-            cmd += "--dumpdecformodel %s " % self.decisions_dumpfile
 
         # disable gauss when gauss is compiled in but asked not to be used
-        if not self.this_gauss_on and "autodisablegauss" in self.extra_opts_supported:
-            cmd += "--maxgaussdepth 0 "
+        #if not self.this_gauss_on and "autodisablegauss" in self.extra_opts_supported:
+            #cmd += "--gauss 0 "
 
         # note, presimp=0 is braindead for preproc but it's mostly 1 so OK
-        cmd += "--presimp %d " % random.choice([1, 1, 1, 1, 1, 1, 1, 0])
-        cmd += "--confbtwsimp %d " % random.choice([100, 1000])
-        cmd += "--everylev1 %d " % random.choice([122, 1222, 12222])
-        cmd += "--everylev2 %d " % random.choice([133, 1333, 14444])
+        cmd += "--presimp %d " % random.choice([1]*10+[0])
+        if not options.gauss:
+            cmd += "--confbtwsimp %d " % random.choice([100, 1000])
+            cmd += "--everylev1 %d " % random.choice([122, 1222, 12222])
+            cmd += "--everylev2 %d " % random.choice([133, 1333, 14444])
+
+        if "breakid" in self.extra_opts_supported:
+            cmd += "--breakid %d " % random.choice([1]*10+[0])
+            cmd += "--breakideveryn %d " % random.choice([1]*10+[3])
+            cmd += "--breakidcls %d " % random.choice([0, 1, 2, 3, 10]+[50]*4)
+            cmd += "--breakidtime %d " % random.choice([10000]*5+[1])
+
         sls = 0
         if options.sls:
             sls = 1
         else:
             # it's kinda slow and using it all the time is probably not a good idea
-            sls = random.choice([0, 0, 0, 1])
+            sls = random.choice([0]*2+[1])
 
+        if options.gauss:
+            sls = 0
+            cmd += "--autodisablegauss %s " % random.choice([0]*15+[1])
+
+            # Don't always use M4RI -- let G-J do toplevel, so fuzzing is more complete
+            cmd += "--m4ri %d " % random.choice([0, 0, 0, 0, 1])
+
+            # "Maximum number of matrixes to treat.")
+            cmd += "--maxnummatrices %s " % int(random.gammavariate(1.5, 20.0))
+
+        # SLS
         cmd += "--sls %d " % sls
         cmd += "--slsgetphase %d " % random.choice([0, 0, 0, 1])
-        cmd += "--slseveryn %d " % random.randint(1, 3)
-        cmd += "--yalsatmems %d " % random.choice([1, 10, 100, 300])
-        cmd += "--walksatruns %d " % random.choice([1, 10, 100, 300])
-        cmd += "--slstype %s " % random.choice(["walksat", "yalsat", "ccnr"])
+        if options.sls:
+            cmd += "--slseveryn 1 "
+        else:
+            cmd += "--slseveryn %d " % random.randint(1, 3)
+        cmd += "--yalsatmems %d " % random.choice([1, 10, 100])
+        cmd += "--walksatruns %d " % random.choice([2, 15, 20])
+        cmd += "--slstype %s " % random.choice(["walksat", "yalsat", "ccnr", "ccnr_yalsat"])
+
+        # polarities
+        cmd += "--polar %s " % random.choice(["true", "false", "rnd", "auto"])
+        cmd += "--lucky %s " % random.choice([1, 1, 1, 0])
+        cmd += "--polarstablen %d " % random.choice([0, 1, 2, -1, 10000])
+
         cmd += "--mustrenumber %d " % random.choice([0, 1])
         cmd += "--diffdeclevelchrono %d " % random.choice([1, random.randint(1, 1000), -1])
         cmd += "--bva %d " % random.choice([1, 1, 1, 0])
@@ -340,38 +366,33 @@ class Tester:
             cmd += "--sampling "
             cmd += ",".join(["%s" % x for x in self.sampling_vars]) + " "
 
-        if random.choice([True, False]) and "clid" in self.extra_opts_supported:
+        if random.choice([True, False]):
             cmd += "--varsperxorcut %d " % random.randint(4, 6)
             cmd += "--tern %d " % random.choice([0, 1])
-            cmd += "--xorcache %d " % random.choice([0, 1])
-            if random.choice([True, True, True, False]):
-                self.clid_added = True
-                cmd += "--clid "
-            cmd += "--consolidatestaticorder %d " % random.choice([0, 1])
+            cmd += "--terntimelim %d " % random.choice([1, 10, 100])
+            cmd += "--ternkeep %d " % random.choice([0, 0.001, 0.5, 300])
+            cmd += "--terncreate %d " % random.choice([0, 0.001, 0.5, 300])
+            if not options.rate and "clid" in self.extra_opts_supported:
+                if random.choice([True, True, True, False]):
+                    self.clid_added = True
+                    cmd += "--clid "
             cmd += "--locgmult %.12f " % random.gammavariate(0.5, 0.7)
             cmd += "--varelimover %d " % random.gammavariate(1, 20)
-            cmd += "--memoutmult %0.12f " % random.gammavariate(0.03, 50)
+            cmd += "--memoutmult %0.12f " % random.gammavariate(0.05, 10)
             cmd += "--verb %d " % random.choice([0, 0, 0, 0, 1, 2])
-            cmd += "--maple %d " % random.choice([0, 1])
             if random.randint(0, 2) == 1:
                 cmd += "--reconf %d " % random.choice([3, 4, 6, 7, 12, 13, 14, 15, 16])
             # cmd += "--undef %d " % random.choice([0, 1])
             cmd += " --reconfat %d " % random.randint(0, 2)
-            cmd += "--ml  %s " % random.randint(0, 10)
+            cmd += " --detachxor %d " % random.choice([0, 1])
             cmd += "--restart %s " % random.choice(
-                ["geom", "glue", "luby"])
+                ["geom", "glue", "luby", "glue-geom"])
             cmd += "--adjustglue %f " % random.choice([0, 0.5, 0.7, 1.0])
             cmd += "--gluehist %s " % random.randint(1, 500)
             cmd += "--updateglueonanalysis %s " % random.randint(0, 1)
-            cmd += "--otfhyper %s " % random.randint(0, 1)
             # cmd += "--clean %s " % random.choice(["size", "glue", "activity",
             # "prconf"])
-            cmd += "--bothprop %s " % random.randint(0, 1)
-            cmd += "--probemaxm %s " % random.choice([0, 10, 100, 1000])
-            cmd += "--cachesize %s " % random.randint(10, 100)
-            cmd += "--cachecutoff %s " % random.randint(0, 2000)
             cmd += "--occredmax %s " % random.randint(0, 100)
-            cmd += "--extscc %s " % random.randint(0, 1)
             cmd += "--distill %s " % random.randint(0, 1)
             cmd += "--recur %s " % random.randint(0, 1)
             cmd += "--compsfrom %d " % random.randint(0, 2)
@@ -389,50 +410,37 @@ class Tester:
 
             # more more minim
             cmd += "--moremoreminim %d " % random.choice([1, 1, 1, 0])
-            cmd += "--moremorecachelimit %d " % int(random.gammavariate(1, 6))
-            cmd += "--moremorestamp %d " % random.choice([1, 1, 1, 0])
             cmd += "--moremorealways %d " % random.choice([1, 1, 1, 0])
 
             if self.this_gauss_on:
-                # Reduce iteratively the matrix that is updated
-                cmd += "--iterreduce %s " % random.choice([0, 1])
+                if random.randint(0,1000) < 10:
+                    # Set maximum no. of rows for gaussian matrix."
+                    cmd += "--maxmatrixrows %s " % int(random.gammavariate(1, 15.0))
 
-                # Only run Gaussian Elimination until this depth
-                cmd += "--maxgaussdepth %s " % int(random.gammavariate(1, 20.0))
-
-                # Set maximum no. of rows for gaussian matrix."
-                cmd += "--maxmatrixrows %s " % int(random.gammavariate(5, 15.0))
-
-                # "Automatically disable gauss when performing badly")
-                cmd += "--autodisablegauss %s " % random.choice([0, 1])
-
-                # "Set minimum no. of rows for gaussian matrix.
-                cmd += "--minmatrixrows %s " % int(random.gammavariate(3, 15.0))
-
-                # Save matrix every Nth decision level."
-                cmd += "--savematrix %s " % (int(random.gammavariate(1, 15.0))+1)
-
-                # "Maximum number of matrixes to treat.")
-                cmd += "--maxnummatrixes %s " % int(random.gammavariate(1, 10.0))
+                    # "Set minimum no. of rows for gaussian matrix.
+                    cmd += "--minmatrixrows %s " % int(random.gammavariate(1, 15.0))
 
             if "sql" in self.extra_opts_supported and random.randint(0, 3) > 0 and self.num_threads == 1 and not self.preproc:
                 cmd += "--sql 2 "
                 self.sqlitedbfname = unique_file("fuzz", ".sqlitedb")
                 cmd += "--sqlitedb %s " % self.sqlitedbfname
+                cmd += "--sqlitedboverwrite 1 "
                 cmd += "--cldatadumpratio %0.3f " % random.choice([0.9, 0.1, 0.7])
 
         # the most buggy ones, don't turn them off much, please
-        if random.choice([True, False]):
-            opts = ["scc", "varelim", "comps", "strengthen", "probe", "intree",
-                    "stamp", "cache",
+        if random.choice([1, 0, 0]):
+            opts = ["scc", "varelim", "comps", "strengthen", "intree",
                     "renumber", "savemem", "moreminim", "gates",
-                    "gorshort", "gandrem", "gateeqlit", "schedsimp"]
+                    "gorshort", "gandrem", "gateeqlit", "schedsimp", "otfhyper"]
 
             if "xor" in self.extra_opts_supported:
                 opts.append("xor")
 
             for opt in opts:
-                cmd += "--%s %d " % (opt, random.randint(0, 1))
+                if opt == "xor" and self.this_gauss_on:
+                    continue
+
+                cmd += "--%s %d " % (opt, random.choice([0, 1, 1, 1, 1]))
 
             cmd += self.rnd_schedule_all(preproc)
 
@@ -495,15 +503,34 @@ class Tester:
         with open(err_fname, "r") as err_file:
             found_something = False
             for line in err_file:
-                print("Error line while executing: %s" % line.strip())
+                line = line.strip()
+                if line == "":
+                    continue
+
+                if options.verbose:
+                    print("ERR line: ", line)
+
+                # let's not care about leaks for the moment
+                if "LeakSanitizer: detected memory leaks" in line:
+                    break
+
                 # don't error out on issues related to UBSAN/ASAN
                 # of clang of other projects
-                if "std::_Ios_Fmtflags" in line or "mzd.h" in line or "lexical_cast.hpp" in line or "MersenneTwister.h" in line:
-                    pass
-                else:
+                noprob = ["std::_Ios_Fmtflags", "mzd.h", "lexical_cast.hpp",
+                      "MersenneTwister.h", "boost::any::holder", "~~~~~",
+                      "SUMMARY", "process memory map", "==========="]
+
+                ok = False
+                for x in noprob:
+                    if x in line:
+                        ok = True
+
+                if not ok:
                     found_something = True
+                    errline = line
 
             if found_something:
+                print("Error line while executing: %s" % errline.strip())
                 exit(-1)
 
         os.unlink(err_fname)
@@ -515,78 +542,6 @@ class Tester:
                   (os.getpid(), resource.getrlimit(resource.RLIMIT_CPU)))
 
         return consoleOutput, retcode
-
-    def check_decisions(self, solution, fname):
-
-        with open(self.decisions_dumpfile, "r") as f:
-            for line in f:
-                if "INVALID" in line:
-                    print("Cannot check decisions, as it's INVALID")
-                    return
-
-        x = Tester()
-        x.needDebugLib = False
-        consoleOutput, retcode = x.execute(
-            fname,
-            fixed_opts=" --zero-exit-status --input %s " % self.decisions_dumpfile,
-            rnd_opts=" ")
-
-        if retcode != 0:
-            print("ERROR while running decision-injected solver, retcode: ", retcode)
-            exit(-1)
-
-        unsat, solution2, _ = x.sol_parser.parse_solution_from_output(
-            consoleOutput.split("\n"), ignoreNoSolution=False)
-
-        if unsat:
-            print("ERROR: after injecting the decisions, the problem is UNSAT")
-            exit(-1)
-
-        bad = False
-        for key, val in solution.items():
-            if key not in solution2:
-                bad = True
-                print("ERROR: variable %d is not in the second solution" % key)
-                break
-            if solution[key] != solution2[key]:
-                print("ERROR: variable %d does not have the same solutions." % key)
-                print("ERROR: original: %s" % solution[key])
-                print("ERROR: decision-injected: %s" % solution2[key])
-                bad = True
-
-        if bad:
-            print("The solution is not the same after injecting decisions!")
-            print("Original solution:", solution)
-            print("New      solution:", solution2)
-            exit(-1)
-
-        print("OK, decisions verified -- solution is the same, all good.")
-
-        # Now we will check if the number of solutions is exactly 1
-        # which it should be
-        x = Tester()
-        x.needDebugLib = False
-        x.novalgrind = True
-        consoleOutput, retcode = x.execute(
-            fname,
-            fixed_opts=" --zero-exit-status --input %s --maxsol 10 " % self.decisions_dumpfile,
-            rnd_opts=" ")
-
-        found_one = False
-        for line in consoleOutput.split("\n"):
-            m = re.match(r".*Number of solutions found until now:[ ]*([^ ]+)", line)
-            if m is not None:
-                num = int(m.group(1))
-                if num == 1:
-                    found_one = True
-                if num > 1:
-                    print("ERROR: we found more than 1 solution given the set of decisions")
-                    exit(-1)
-        if not found_one:
-            print("ERROR: Did not even find one solution for multi-solution with decisions")
-            exit(-1)
-
-        print("OK, number of decision-restricted solutions verified")
 
     def check(self, fname, fname2=None,
               checkAgainst=None,
@@ -607,7 +562,6 @@ class Tester:
         # and that is why there is no solution
         diff_time = time.time() - curr_time
         if diff_time > (options.maxtime - options.maxtimediff) / self.num_threads:
-            self.delete_decisions_dumpfile()
             print("Too much time to solve, aborted!")
             return None
 
@@ -617,13 +571,16 @@ class Tester:
         if options.verbose:
             print(consoleOutput)
 
+        if retcode != 0:
+            print("Return code of CryptoMiniSat is not 0, it is: %d -- error!" % retcode)
+            exit(-1)
+
         # if library debug is set, check it
         if (self.needDebugLib):
-            self.sol_parser.check_debug_lib(checkAgainst)
-
-        if retcode != 0:
-            print("Return code is not 0, error!")
-            exit(-1)
+            must_check_unsat = True
+            if options.gauss:
+                must_check_unsat = random.choice([False]*15+[True])
+            self.sol_parser.check_debug_lib(checkAgainst, must_check_unsat)
 
         print("Checking console output...")
         unsat, solution, _ = self.sol_parser.parse_solution_from_output(
@@ -634,7 +591,6 @@ class Tester:
             f = open(dump_output_fname, "w")
             f.write(consoleOutput)
             f.close()
-            self.delete_decisions_dumpfile()
             return True
 
         if not unsat:
@@ -646,21 +602,21 @@ class Tester:
             if self.dump_red:
                 self.check_dumped_clauses(fname)
 
-            if self.decisions_dumpfile is not None and checkAgainst == fname:
-                if len(self.sampling_vars) == 0:
-                    self.check_decisions(solution, fname)
-
-            self.delete_decisions_dumpfile()
             return
-
-        self.delete_decisions_dumpfile()
 
         # it's UNSAT, let's check with DRAT
         if fname2:
-            toexec = "../../build/tests/drat-trim/drat-trim {cnf} {dratf} {opt}"
-            opt = ""
+            if not options.rate:
+                toexec = "../../build/utils/drat-trim/drat-trim {cnf} {dratf} {opt}"
+                opt = ""
+            else:
+                assert self.clid_added == False, "Error: 'rate' DRAT checker cannot handle clids"
+                toexec = "rate {cnf} {dratf} {opt}"
+                # opt = "--skip-unit-deletions "
+                opt = ""
+
             if self.clid_added:
-                opt = "-i "
+                opt += "-i "
             toexec = toexec.format(cnf=fname, dratf=fname2, opt=opt)
             print("Checking DRAT...: ", toexec)
             p = subprocess.Popen(toexec.rsplit(),
@@ -693,6 +649,11 @@ class Tester:
             else:
                 print("OK, DRAT says: %s" % dratLine)
 
+        if options.gauss:
+            if random.choice([True, True, True, True, False]):
+                print("NOT verifying with other solver, it's Gauss so too expensive")
+                return
+
         # check with other solver
         ret = self.sol_parser.check_unsat(checkAgainst)
         if ret is None:
@@ -702,11 +663,6 @@ class Tester:
         else:
             print("Grave bug: SAT-> UNSAT : Other solver found solution!!")
             exit()
-
-    def delete_decisions_dumpfile(self):
-        if self.decisions_dumpfile is not None:
-            os.unlink(self.decisions_dumpfile)
-            self.decisions_dumpfile = None
 
     def check_dumped_clauses(self, fname):
         assert self.dump_red is not None
@@ -742,15 +698,13 @@ class Tester:
 
     def fuzz_test_one(self):
         print("--- NORMAL TESTING ---")
-        self.decisions_dumpfile = None
-        self.num_threads = random.choice([1, 1, 1, 1, 1, 1, 4])
+        self.num_threads = random.choice([1]+[random.randint(2,4)])
         self.num_threads = min(options.max_threads, self.num_threads)
-        self.this_gauss_on = "autodisablegauss" in self.extra_opts_supported and random.choice([True, False, False])
-        if options.gauss:
-            self.this_gauss_on = True
-            assert "autodisablegauss" in self.extra_opts_supported
+        self.this_gauss_on = "autodisablegauss" in self.extra_opts_supported
 
-        self.drat = self.num_threads == 1 and random.randint(0, 10) < 5 and (not self.this_gauss_on)
+        # drat turns off a bunch of systems, like symmetry breaking so use it about 50% of time
+        self.drat = self.num_threads == 1 and (random.randint(0, 10) < 5)
+
         self.sqlitedbfname = None
         self.preproc = False
         self.dump_red = random.choice([None, None, None, None, None, True])
@@ -842,7 +796,6 @@ class Tester:
 
     def fuzz_test_preproc(self):
         print("--- PREPROC TESTING ---")
-        assert self.decisions_dumpfile is None
         self.this_gauss_on = False  # don't do gauss on preproc
         assert self == tester
         tester.needDebugLib = False
@@ -880,7 +833,7 @@ class Tester:
         else:
             print("Within time limit: %.2f s" % diff_time)
             if retcode != 0:
-                print("Return code is not 0, error!")
+                print("Return code of CMS is not 0, it is: %d -- error!" % retcode)
                 exit(-1)
 
             solution = "%s-solution.sol" % fname
@@ -903,20 +856,6 @@ class Tester:
         assert self.dump_red is None
 
 
-def filter_large_fuzzer(dat):
-    f = []
-    for x in dat:
-        okay = True
-        for y in x:
-            if "large" in y:
-                okay = False
-
-        if okay:
-            f.append(x)
-
-    return f
-
-
 fuzzers_noxor = [
     ["../../build/tests/sha1-sat/sha1-gen --nocomment --attack preimage --rounds 20",
      "--hash-bits", "--seed"],
@@ -924,7 +863,6 @@ fuzzers_noxor = [
         "--message-bits 400 --rounds 8 --hash-bits 60",
      "--seed"],
     # ["build/cnf-fuzz-nossum"],
-    ["../../build/tests/cnf-utils/largefuzzer"],
     ["../../build/tests/cnf-utils/cnf-fuzz-biere"],
     ["../../build/tests/cnf-utils/cnf-fuzz-biere"],
     ["../../build/tests/cnf-utils/cnf-fuzz-biere"],
@@ -934,7 +872,7 @@ fuzzers_noxor = [
     ["../../build/tests/cnf-utils/cnf-fuzz-biere"],
     ["../../build/tests/cnf-utils/cnf-fuzz-biere"],
     ["../../build/tests/cnf-utils/cnf-fuzz-biere"],
-    ["../../build/tests/cnf-utils/makewff -cnf 3 300 1700", "-seed"],
+    ["../../build/tests/cnf-utils/makewff -cnf 3 250 1080", "-seed"],
     ["../../build/tests/cnf-utils/sgen4 -unsat -n 50", "-s"],
     ["../../build/tests/cnf-utils//sgen4 -sat -n 50", "-s"],
     ["../../utils/cnf-utils/cnf-fuzz-brummayer.py", "-s"],
@@ -942,11 +880,16 @@ fuzzers_noxor = [
     ["../../utils/cnf-utils/multipart.py", "special"]
 ]
 fuzzers_noxor_sls = [
-    ["../../build/tests/cnf-utils/makewff -cnf 3 250 1080", "-seed"],
+    ["../../build/tests/cnf-utils/makewff -cnf 3 250 1060", "-seed"],
 ]
 
 fuzzers_xor = [
     ["../../utils/cnf-utils/xortester.py", "--seed"],
+    ["../../utils/cnf-utils/xortester.py", "--seed"],
+    ["../../utils/cnf-utils/xortester.py", "--seed"],
+    ["../../utils/cnf-utils/xortester.py", "--seed"],
+    ["../../utils/cnf-utils/xortester.py", "--seed"],
+    ["../../utils/cnf-utils/spacer_test.py", "--seed"],
     ["../../build/tests/sha1-sat/sha1-gen --xor --attack preimage --rounds 21",
      "--hash-bits", "--seed"],
 ]
@@ -966,9 +909,6 @@ if __name__ == "__main__":
 
     fuzzers_drat = fuzzers_noxor
     fuzzers_nodrat = fuzzers_noxor + fuzzers_xor
-    if options.small:
-        fuzzers_drat = filter_large_fuzzer(fuzzers_drat)
-        fuzzers_nodrat = filter_large_fuzzer(fuzzers_nodrat)
     if options.sls:
         fuzzers_drat = fuzzers_noxor_sls
         fuzzers_nodrat = fuzzers_noxor_sls
@@ -983,12 +923,10 @@ if __name__ == "__main__":
 
     while True:
         toexec = "./fuzz_test.py --fuzzlim 1 --seed %d " % rnd_seed
-        if options.novalgrind:
-            toexec += "--novalgrind "
+        if not options.novalgrind:
+            toexec += "--dovalgrind "
         if options.valgrind_freq:
             toexec += "--valgrindfreq %d " % options.valgrind_freq
-        if options.small:
-            toexec += "--small "
         if options.gauss:
             toexec += "--gauss "
         if options.sls:
@@ -1000,6 +938,7 @@ if __name__ == "__main__":
         if options.nopreproc:
             toexec += "--nopreproc "
         toexec += "-m %d " % options.max_threads
+        toexec += "-t %d " % options.maxtime
 
         print("")
         print("")

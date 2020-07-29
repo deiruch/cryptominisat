@@ -68,7 +68,6 @@ struct AtecedentData
         glue_long_reds += other.glue_long_reds;
         size_longs += other.size_longs;
         age_long_reds += other.age_long_reds;
-        vsids_vars += other.vsids_vars;
 
         return *this;
     }
@@ -84,7 +83,6 @@ struct AtecedentData
         glue_long_reds -= other.glue_long_reds;
         size_longs -= other.size_longs;
         age_long_reds -= other.age_long_reds;
-        vsids_vars -= other.vsids_vars;
 
         return *this;
     }
@@ -106,10 +104,6 @@ struct AtecedentData
     AvgCalc<uint32_t> glue_long_reds;
     AvgCalc<uint32_t> size_longs;
     AvgCalc<uint32_t> age_long_reds;
-    AvgCalc<double, double> vsids_all_incoming_vars;
-    AvgCalc<double, double> vsids_vars;
-    AvgCalc<double, double> vsids_of_resolving_literals;
-    AvgCalc<double, double> vsids_of_ants;
 };
 
 struct ClauseStats
@@ -117,42 +111,91 @@ struct ClauseStats
     ClauseStats()
     {
         glue = 1000;
+        marked_clause = false;
+        ttl = 0;
         which_red_array = 2;
+        locked_for_data_gen = 0;
+        is_decision = false;
         //TODO it's weird, it has been tested to be better with "1"
         activity = 1;
-        ttl = 0;
-        marked_clause = false;
+        last_touched = 0;
     }
 
     //Stored data
-    uint32_t glue:27;
+    uint32_t glue:20;  //currently in code limited to 100'000
+    uint32_t is_decision:1;
     uint32_t marked_clause:1;
     uint32_t ttl:2;
-    uint32_t which_red_array:2;
-    float   activity = 0.0f;
-    uint32_t last_touched = 0;
-    #ifdef STATS_NEEDED
-    uint32_t dump_number = std::numeric_limits<uint32_t>::max();
-    int64_t ID = 0;
-    uint64_t introduced_at_conflict = 0; ///<At what conflict number the clause  was introduced
-    uint64_t conflicts_made = 0; ///<Number of times caused conflict
-    uint64_t sum_of_branch_depth_conflict = 0;
-    uint64_t propagations_made = 0; ///<Number of times caused propagation
-    uint64_t clause_looked_at = 0; ///<Number of times the clause has been deferenced during propagation
-    uint64_t used_for_uip_creation = 0; ///Number of times the claue was using during 1st UIP generation
-    AtecedentData<uint16_t> antec_data;
+    uint32_t which_red_array:3;
+    uint32_t locked_for_data_gen:1;
+    union {
+        float   activity;
+        uint32_t hash_val; //used in BreakID to remove equivalent clauses
+    };
+    uint32_t last_touched;
+    #ifdef FINAL_PREDICTOR
+#ifdef EXTENDED_FEATURES
+    uint32_t    rdb1_last_touched;
+#endif
+    float       glue_hist_long;
+    float       glue_hist_queue;
+#ifdef EXTENDED_FEATURES
+    float       glue_hist;
+#endif
+    float       confl_size_hist_lt;
+    uint32_t    glue_before_minim;
+//     uint32_t    num_overlap_literals;
+    float       antec_overlap_hist;
+    uint32_t    num_total_lits_antecedents;
+//     uint32_t    rdb1_last_touched_diff;
+    uint32_t    num_antecedents;
+    float       branch_depth_hist_queue;
+    float       num_resolutions_hist_lt;
+//     uint32_t    trail_depth_hist_longer;
+#ifdef EXTENDED_FEATURES
+    float       rdb1_act_ranking_rel = 0;
+#endif
+//     uint8_t     rdb1_act_ranking_top_10 = 0;
+    float pred_short_use;
+    float pred_long_use;
+    float pred_forever_use;
+    #endif
+
+    #if defined(STATS_NEEDED) || defined (FINAL_PREDICTOR)
+    uint16_t dump_no = 0;
+    uint32_t orig_glue;
+    uint32_t introduced_at_conflict = 0; ///<At what conflict number the clause  was introduced
+
+    //for average and sum stats
+    uint32_t sum_uip1_used = 0; ///N.o. times claue was used during 1st UIP generation for ALL TIME
+
+    //below resets
+    uint32_t used_for_uip_creation = 0; ///N.o. times claue was used during 1st UIP generation in this RDB
+//     uint32_t rdb1_used_for_uip_creation = 0; ///N.o. times claue was used during 1st UIP generation in previous RDB
+    uint32_t propagations_made = 0; ///<Number of times caused propagation
+    uint32_t rdb1_propagations_made = 0; ///<Number of times caused propagation, last round
     #endif
 
     #ifdef STATS_NEEDED
+    int32_t ID = 0;
+    uint32_t sum_propagations_made = 0; ///<Number of times caused propagation
+
+    AtecedentData<uint16_t> antec_data;
+    uint32_t conflicts_made = 0; ///<Number of times caused conflict
+    uint32_t clause_looked_at = 0; ///<Number of times the clause has been deferenced during propagation
+    #endif
+
+    #if defined(STATS_NEEDED) || defined (FINAL_PREDICTOR)
     void reset_rdb_stats()
     {
         ttl = 0;
-        conflicts_made = 0;
-        sum_of_branch_depth_conflict = 0;
-        propagations_made = 0;
-        clause_looked_at = 0;
         used_for_uip_creation = 0;
+        propagations_made = 0;
+        #if defined(STATS_NEEDED)
+        clause_looked_at = 0;
+        conflicts_made = 0;
         antec_data.clear();
+        #endif
     }
     #endif
 
@@ -164,14 +207,25 @@ struct ClauseStats
         //Combine stats
         ret.glue = std::min(first.glue, second.glue);
         ret.activity = std::max(first.activity, second.activity);
-        #ifdef STATS_NEEDED
-        ret.introduced_at_conflict = std::min(first.introduced_at_conflict, second.introduced_at_conflict);
-        ret.conflicts_made = first.conflicts_made + second.conflicts_made;
-        ret.sum_of_branch_depth_conflict = first.sum_of_branch_depth_conflict  + second.sum_of_branch_depth_conflict;
-        ret.propagations_made = first.propagations_made + second.propagations_made;
-        ret.clause_looked_at = first.clause_looked_at + second.clause_looked_at;
+
+        #if defined(STATS_NEEDED) || defined (FINAL_PREDICTOR)
+        if (first.introduced_at_conflict == 0) {
+            ret.introduced_at_conflict = second.introduced_at_conflict;
+        } else if (second.introduced_at_conflict == 0) {
+            ret.introduced_at_conflict = first.introduced_at_conflict;
+        } else {
+            ret.introduced_at_conflict = std::min(first.introduced_at_conflict, second.introduced_at_conflict);
+        }
         ret.used_for_uip_creation = first.used_for_uip_creation + second.used_for_uip_creation;
+        ret.propagations_made = first.propagations_made + second.propagations_made;
         #endif
+
+        #ifdef STATS_NEEDED
+        ret.ID = 0; //don't track combined clauses
+        ret.conflicts_made = first.conflicts_made + second.conflicts_made;
+        ret.clause_looked_at = first.clause_looked_at + second.clause_looked_at;
+        #endif
+
         ret.which_red_array = std::min(first.which_red_array, second.which_red_array);
 
         return ret;
@@ -182,12 +236,14 @@ inline std::ostream& operator<<(std::ostream& os, const ClauseStats& stats)
 {
 
     os << "glue " << stats.glue << " ";
-    #ifdef STATS_NEEDED
+    #if defined(STATS_NEEDED) || defined (FINAL_PREDICTOR)
     os << "conflIntro " << stats.introduced_at_conflict<< " ";
-    os << "numConfl " << stats.conflicts_made<< " ";
+    os << "used_for_uip_creation " << stats.used_for_uip_creation << " ";
     os << "numProp " << stats.propagations_made<< " ";
+    #endif
+    #ifdef STATS_NEEDED
+    os << "numConfl " << stats.conflicts_made<< " ";
     os << "numLook " << stats.clause_looked_at<< " ";
-    os << "used_for_uip_creation" << stats.used_for_uip_creation << " ";
     #endif
 
     return os;
@@ -209,10 +265,12 @@ public:
     uint16_t isFreed:1; ///<Has this clause been marked as freed by the ClauseAllocator ?
     uint16_t is_distilled:1;
     uint16_t is_ternary_resolved:1;
-    uint16_t is_ternary:1;
+    uint16_t is_ternary_resolvent:1;
     uint16_t occurLinked:1;
     uint16_t must_recalc_abst:1;
     uint16_t _used_in_xor:1;
+    uint16_t _used_in_xor_full:1;
+    uint16_t _xor_is_detached:1;
     uint16_t _gauss_temp_cl:1; ///Used ONLY by Gaussian elimination to incicate where a proagation is coming from
     uint16_t reloced:1;
 
@@ -242,8 +300,11 @@ public:
         //assert(ps.size() > 2);
 
         stats.last_touched = _introduced_at_conflict;
-        #ifdef STATS_NEEDED
+        #if defined(FINAL_PREDICTOR) || defined(STATS_NEEDED)
         stats.introduced_at_conflict = _introduced_at_conflict;
+        #endif
+
+        #ifdef STATS_NEEDED
         stats.ID = _ID;
         assert(_ID >= 0);
         #endif
@@ -254,10 +315,11 @@ public:
         isRemoved = false;
         is_distilled = false;
         is_ternary_resolved = false;
-        is_ternary = false;
+        is_ternary_resolvent = false;
         must_recalc_abst = true;
         _used_in_xor = false;
-        _gauss_temp_cl = false;
+        _used_in_xor_full = false;
+        _xor_is_detached = false;
         reloced = false;
 
         for (uint32_t i = 0; i < ps.size(); i++) {
@@ -273,16 +335,6 @@ public:
         return mySize;
     }
 
-    bool gauss_temp_cl() const
-    {
-        return _gauss_temp_cl;
-    }
-
-    void set_gauss_temp_cl()
-    {
-        _gauss_temp_cl = true;
-    }
-
     bool used_in_xor() const
     {
         return _used_in_xor;
@@ -291,6 +343,16 @@ public:
     void set_used_in_xor(const bool val)
     {
         _used_in_xor = val;
+    }
+
+    bool used_in_xor_full() const
+    {
+        return _used_in_xor_full;
+    }
+
+    void set_used_in_xor_full(const bool val)
+    {
+        _used_in_xor_full = val;
     }
 
     void shrink(const uint32_t i)
@@ -358,9 +420,16 @@ public:
         isRed = false;
     }
 
-    void makeRed()
+    void makeRed(uint64_t
+    #if defined(FINAL_PREDICTOR) || defined(STATS_NEEDED)
+    confl_num
+    #endif
+    )
     {
         isRed = true;
+        #if defined(FINAL_PREDICTOR) || defined(STATS_NEEDED)
+        stats.introduced_at_conflict = confl_num;
+        #endif
     }
 
     void strengthen(const Lit p)

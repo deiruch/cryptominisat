@@ -5,10 +5,12 @@ from __future__ import print_function
 import sqlite3
 import optparse
 import operator
+import time
+import helper
 
 
 class Query:
-    def __init__(self):
+    def __init__(self, dbfname):
         self.conn = sqlite3.connect(dbfname)
         self.c = self.conn.cursor()
 
@@ -18,13 +20,39 @@ class Query:
     def __exit__(self, exc_type, exc_value, traceback):
         self.conn.close()
 
+    def create_indexes(self):
+        helper.drop_idxs(self.c)
+
+        print("Recreating indexes...")
+        queries = """
+        create index `idx1` on `tags` (`runid`, `name`);
+        create index `idx2` on `timepassed` (`runid`, `elapsed`);
+        create index `idx3` on `timepassed` (`runid`, `elapsed`, `name`);
+        create index `idx4` on `memused` (`runid`, `MB`, `name`);
+
+        """
+        for l in queries.split('\n'):
+            t2 = time.time()
+
+            if options.verbose:
+                print("Creating index: ", l)
+            self.c.execute(l)
+            if options.verbose:
+                print("Index creation T: %-3.2f s" % (time.time() - t2))
+
+        print("indexes created T: %-3.2f s" % (time.time() - t))
+
     def find_time_outliers(self):
         print("----------- TIME OUTLIERS --------------")
         query = """
-        select tags.tag, name, elapsed
+        select tags.val, timepassed.name, timepassed.elapsed
         from timepassed,tags
-        where name != 'search' and elapsed > %d and
-        tags.tagname="filename" and tags.runID = timepassed.runID
+        where
+        timepassed.name != 'search'
+        and timepassed.elapsed > %d
+        and tags.name="filename"
+        and tags.runid = timepassed.runid
+
         order by elapsed desc;
         """ % (options.maxtime)
 
@@ -38,15 +66,17 @@ class Query:
         print("----------- MEMORY OUTLIERS --------------")
 
         query = """
-        select tags.tag, memused.name, max(memused.MB)
+        select tags.val, memused.name, max(memused.MB)
         from memused,tags
-        where  tags.tagname="filename"
-        and tags.runID = memused.runID
+        where
+        tags.name="filename"
         and memused.MB > %d
         and memused.name != 'vm'
         and memused.name != 'rss'
         and memused.name != 'longclauses'
-        group by tags.tag, memused.name
+        and tags.runid = memused.runid
+
+        group by tags.val, memused.name
         order by MB desc;
         """ % (options.maxmemory)
 
@@ -60,13 +90,15 @@ class Query:
         print("----------- MEMORY OUTLIERS RSS --------------")
 
         query = """
-        select tags.tag, memused.name, max(memused.MB)
+        select tags.val, memused.name, max(memused.MB)
         from memused,tags
-        where  tags.tagname="filename"
-        and tags.runID = memused.runID
+        where
+        tags.name="filename"
         and memused.MB > %d
         and memused.name == 'rss'
-        group by tags.tag, memused.name
+        and tags.runid = memused.runid
+
+        group by tags.val, memused.name
         order by MB desc;
         """ % (options.maxmemory*2)
 
@@ -79,25 +111,26 @@ class Query:
     def find_worst_unaccounted_memory(self):
         print("----------- Largest RSS vs counted differences --------------")
         query = """
-        select tags.tag, a.`runtime`, abs((b.rss-a.mysum)/b.rss) as differperc,
+        select tags.val, a.`runtime`, abs((b.rss-a.mysum)/b.rss) as differperc,
             a.mysum as counted, b.rss as total
         from tags,
 
-        (select runID, `runtime`, sum(MB) as mysum
+        (select runid, `runtime`, sum(MB) as mysum
         from memused
         where name != 'rss'
         and name != 'vm'
-        group by `runtime`, runID) as a,
+        group by `runtime`) as a,
 
-        (select runID, name, `runtime`, MB as rss
+        (select runid, name, `runtime`, MB as rss
         from memused
         where name = 'rss') as b
 
-        where tags.runID = a.runID
-        and tags.tagname="filename"
-        and a.runID = b.runID
+        where
+        tags.name="filename"
         and a.`runtime` = b.`runtime`
         and total > %d
+        and a.runid = tags.runid
+        and b.runid = tags.runid
 
         order by differperc desc
         """ % (options.minmemory)
@@ -205,47 +238,52 @@ class Query:
 
         #last conflict > 60000, UNSAT, solvetime under 500s
         query = """
-        select a.runID, tags.tag, a.maxtime, a.maxconfl, mems.maxmem from
+        select tags.val, a.maxtime, a.maxconfl, mems.maxmem
 
-            (select runID, max(conflicts) as maxconfl, max(`runtime`) as maxtime
-            from timepassed
-            group by runID
-            ) as a,
-            (select runID
-            from finishup
-            where status = "l_False"
-            ) as b,
-            (select runID, max(MB) as maxmem
-            from memused
-            group by runID
-            ) as mems, tags
+        from
+        (select runid, max(conflicts) as maxconfl, max(`runtime`) as maxtime
+        from timepassed
+        ) as a
 
-            where a.maxconfl > 20000
-            and a.maxconfl < 400000
-            and a.maxtime < 400
-            and a.maxtime > 10
-            and a.runID = b.runID
-            and tags.runID = a.runID
-            and tags.tagname = "filename"
-            and mems.runID = a.runID
-            order by maxtime desc
+        , (select *
+        from finishup
+        where status = "l_False"
+        ) as b
+
+        , (select runid, max(MB) as maxmem
+        from memused
+        ) as mems
+
+        , tags
+
+        where a.maxconfl > 20000
+        and a.maxconfl < 400000
+        and a.maxtime < 400
+        and a.maxtime > 10
+        and tags.name = "filename"
+        and tags.runid = a.runid
+        and tags.runid = b.runid
+
+
+        order by maxtime desc
         """
 
-        runIDs = []
         for row in self.c.execute(query):
             fname = row[1].split("/")
             fname = fname[len(fname)-1]
-            runID = int(row[0])
-            t = row[2]
-            confl = row[3]
-            mb = row[4]
-            print("runID %-10d  t(mins): %-6.1f  confl(K): %-6.1f  mem(GB): %-6.1f  fname: %s" %
-                  (runID, t/60.0, confl/(1000.0), mb/1024.0, fname))
+            t = row[1]
+            confl = row[2]
+            mb = row[3]
+            print("t(mins): %-6.1f  confl(K): %-6.1f  mem(GB): %-6.1f  fname: %s" %
+                  (t/60.0, confl/(1000.0), mb/1024.0, fname))
 
 
 if __name__ == "__main__":
     usage = "usage: %prog [options] sqlitedb"
     parser = optparse.OptionParser(usage=usage)
+
+    parser.add_option("--createind", action="store_true", default=False,
+                      dest="create_indexes", help="Create indexes")
 
     parser.add_option("--maxtime", metavar="CUTOFF",
                       dest="maxtime", default=20, type=int,
@@ -272,7 +310,9 @@ if __name__ == "__main__":
     print("Using sqlite3db file %s" % dbfname)
 
     #peform queries
-    with Query() as q:
+    with Query(dbfname) as q:
+        if options.create_indexes:
+            q.create_indexes()
         q.find_intersting_problems()
         q.find_worst_unaccounted_memory()
         q.check_memory_rss()

@@ -119,7 +119,7 @@ bool TopLevelGauss::extractInfo()
     runStats.blockCutTime += cpuTime() -myTime;
     myTime = cpuTime();
 
-    //These mappings will be needed for the matrixes, which will have far less
+    //These mappings will be needed for the matrices, which will have far less
     //variables than solver->nVars()
     outerToInterVarMap.clear();
     outerToInterVarMap.resize(solver->nVars(), std::numeric_limits<uint32_t>::max());
@@ -144,11 +144,11 @@ bool TopLevelGauss::extractInfo()
         if (!extractInfoFromBlock(*it, i))
             goto end;
 
-        if (solver->conf.verbosity >= 5) {
-            cout << "Block size: " << it->size() << endl;
-            cout << "New units this round: " << (runStats.newUnits - oldNewUnits) << endl;
-            cout << "New bins this round: " << (runStats.newBins - oldNewBins) << endl;
-            cout << "Time: " << std::setprecision(3) << std::fixed << (cpuTime() - t) << endl;
+        if (solver->conf.verbosity >= 2) {
+            cout << "c [toplevel-xor] Block size: " << it->size() << endl;
+            cout << "c [toplevel-xor] New units this round: " << (runStats.newUnits - oldNewUnits) << endl;
+            cout << "c [toplevel-xor] New bins this round: " << (runStats.newBins - oldNewBins) << endl;
+            cout << "c [toplevel-xor] Time: " << std::setprecision(3) << std::fixed << (cpuTime() - t) << endl;
         }
     }
 
@@ -428,29 +428,6 @@ void TopLevelGauss::Stats::print_short(const Solver* solver) const
     << " 0-depth-ass: " << zeroDepthAssigns
     << solver->conf.print_times(extractTime)
     << endl;
-}
-
-void TopLevelGauss::Stats::print() const
-{
-    cout << "c --------- XOR STATS ----------" << endl;
-
-    print_stats_line("c XOR Num calls"
-        , numCalls
-    );
-
-    print_stats_line("c XOR 0-depth assings"
-        , zeroDepthAssigns
-    );
-
-    print_stats_line("c XOR unit found"
-        , newUnits
-    );
-
-    print_stats_line("c XOR bin found"
-        , newBins
-    );
-
-    cout << "c --------- XOR STATS END ----------" << endl;
 }
 
 TopLevelGauss::Stats& TopLevelGauss::Stats::operator+=(const TopLevelGauss::Stats& other)

@@ -70,23 +70,30 @@ namespace CMSat {
         CMSatPrivateData& operator=(const CMSatPrivateData&) = delete;
 
         vector<Solver*> solvers;
-        vector<double> cpu_times;
         SharedData *shared_data = NULL;
         int which_solved = 0;
         std::atomic<bool>* must_interrupt;
         bool must_interrupt_needs_delete = false;
-        unsigned cls = 0;
-        unsigned vars_to_add = 0;
-        vector<Lit> cls_lits;
         bool okay = true;
         std::ofstream* log = NULL;
         int sql = 0;
         double timeout = std::numeric_limits<double>::max();
         bool interrupted = false;
 
+        //variables and clauses added/to add
+        unsigned cls = 0;
+        unsigned vars_to_add = 0;
+        vector<Lit> cls_lits;
+
+        //For single call setup
+        uint32_t num_solve_simplify_calls = 0;
+        bool promised_single_call = false;
+
+        //stats
         uint64_t previous_sum_conflicts = 0;
         uint64_t previous_sum_propagations = 0;
         uint64_t previous_sum_decisions = 0;
+        vector<double> cpu_times;
     };
 }
 
@@ -149,6 +156,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
         conf.reconfigure_val = 0;
     }
     conf.origSeed += thread_num;
+    conf.thread_num = thread_num;
 
     switch(thread_num % 23) {
         case 0: {
@@ -158,7 +166,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
 
         case 1: {
             //Minisat-like
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.varElimRatioPerIter = 1;
             conf.restartType = Restart::geom;
             conf.polarity_mode = CMSat::PolarityMode::polarmode_neg;
@@ -169,14 +177,13 @@ void update_config(SolverConf& conf, unsigned thread_num)
             break;
         }
         case 2: {
-            conf.maple = 1;
-            conf.modulo_maple_iter = 100;
+            conf.branch_strategy_setup = "vsids1";
             break;
         }
         case 3: {
             //Similar to CMS 2.9 except we look at learnt DB size insteead
             //of conflicts to see if we need to clean.
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0.5;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0;
             conf.glue_put_lev0_if_below_or_eq = 0;
@@ -185,7 +192,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
         }
         case 4: {
             //Similar to CMS 5.0
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.varElimRatioPerIter = 0.4;
             conf.every_lev1_reduce = 0;
             conf.every_lev2_reduce = 0;
@@ -198,46 +205,43 @@ void update_config(SolverConf& conf, unsigned thread_num)
             break;
         }
         case 5: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.never_stop_search = true;
             break;
         }
         case 6: {
             //Maple with backtrack
-            conf.maple = 1;
-            conf.modulo_maple_iter = 100;
+            conf.branch_strategy_setup = "vsids1";
             break;
         }
         case 7: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.do_bva = false;
             conf.glue_put_lev0_if_below_or_eq = 2;
             conf.varElimRatioPerIter = 1;
             conf.inc_max_temp_lev2_red_cls = 1.04;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0.1;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0.3;
-            conf.var_decay_vsids_max = 0.90; //more 'slow' in adjusting activities
             break;
         }
         case 8: {
             //Different glue limit
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.glue_put_lev0_if_below_or_eq = 2;
             conf.glue_put_lev1_if_below_or_eq = 2;
             break;
         }
         case 9: {
-            conf.maple = 0;
-            conf.var_decay_vsids_max = 0.998;
+            conf.branch_strategy_setup = "vsids1";
             break;
         }
         case 10: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.polarity_mode = CMSat::PolarityMode::polarmode_pos;
             break;
         }
         case 11: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.varElimRatioPerIter = 1;
             conf.restartType = Restart::geom;
 
@@ -247,14 +251,13 @@ void update_config(SolverConf& conf, unsigned thread_num)
             break;
         }
         case 12: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.inc_max_temp_lev2_red_cls = 1.001;
             break;
         }
 
         case 13: {
             //Minisat-like
-            conf.maple = 1;
             conf.varElimRatioPerIter = 1;
             conf.restartType = Restart::geom;
             conf.polarity_mode = CMSat::PolarityMode::polarmode_neg;
@@ -266,7 +269,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
         }
         case 14: {
             //Different glue limit
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.do_bva = false;
             conf.doMinimRedMoreMore = 1;
             conf.glue_put_lev0_if_below_or_eq = 4;
@@ -278,7 +281,6 @@ void update_config(SolverConf& conf, unsigned thread_num)
         case 15: {
             //Similar to CMS 2.9 except we look at learnt DB size insteead
             //of conflicts to see if we need to clean.
-            conf.maple = 1;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::glue)] = 0.5;
             conf.ratio_keep_clauses[clean_to_int(ClauseClean::activity)] = 0;
             conf.glue_put_lev0_if_below_or_eq = 0;
@@ -287,7 +289,6 @@ void update_config(SolverConf& conf, unsigned thread_num)
         }
         case 16: {
             //Similar to CMS 5.0
-            conf.maple = 1;
             conf.varElimRatioPerIter = 0.4;
             conf.every_lev1_reduce = 0;
             conf.every_lev2_reduce = 0;
@@ -304,7 +305,7 @@ void update_config(SolverConf& conf, unsigned thread_num)
             break;
         }
         case 18: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1+vsids2";
             conf.every_lev1_reduce = 0;
             conf.every_lev2_reduce = 0;
             conf.glue_put_lev1_if_below_or_eq = 0;
@@ -313,52 +314,44 @@ void update_config(SolverConf& conf, unsigned thread_num)
         }
 
         case 19: {
-            conf.maple = 1;
             conf.do_bva = false;
             conf.doMinimRedMoreMore = 0;
             conf.orig_global_timeout_multiplier = 5;
             conf.num_conflicts_of_search_inc = 1.15;
-            conf.more_red_minim_limit_cache = 1200;
             conf.more_red_minim_limit_binary = 600;
             conf.max_num_lits_more_more_red_min = 20;
             //conf.max_temporary_learnt_clauses = 10000;
-            conf.var_decay_vsids_max = 0.99; //more 'fast' in adjusting activities
             break;
         }
 
         case 20: {
             //Luby
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.restart_inc = 1.5;
             conf.restart_first = 100;
-            conf.restartType = CMSat::Restart::luby;
+            conf.restartType = Restart::luby;
             break;
         }
 
         case 21: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids2";
             conf.glue_put_lev0_if_below_or_eq = 3;
             conf.glue_put_lev1_if_below_or_eq = 5;
-            conf.var_decay_vsids_max = 0.97;
             break;
         }
 
         case 22: {
-            conf.maple = 0;
+            conf.branch_strategy_setup = "vsids1";
             conf.doMinimRedMoreMore = 0;
             conf.orig_global_timeout_multiplier = 5;
             conf.num_conflicts_of_search_inc = 1.15;
-            conf.more_red_minim_limit_cache = 1200;
             conf.more_red_minim_limit_binary = 600;
             conf.max_num_lits_more_more_red_min = 20;
             //conf.max_temporary_learnt_clauses = 10000;
-            conf.var_decay_vsids_max = 0.99; //more 'fast' in adjusting activities
             break;
         }
 
         default: {
-            conf.maple = ((thread_num % 3) <= 1);
-            conf.modulo_maple_iter = (thread_num % 7)+1;
             conf.varElimRatioPerIter = 0.1*(thread_num % 9);
             if (thread_num % 4 == 0) {
                 conf.restartType = Restart::glue;
@@ -480,12 +473,17 @@ struct OneThreadAddCls
 static bool actually_add_clauses_to_threads(CMSatPrivateData* data)
 {
     DataForThread data_for_thread(data);
-    std::vector<std::thread> thds;
-    for(size_t i = 0; i < data->solvers.size(); i++) {
-        thds.push_back(thread(OneThreadAddCls(data_for_thread, i)));
-    }
-    for(std::thread& thread : thds){
-        thread.join();
+    if (data->solvers.size() == 1) {
+        OneThreadAddCls t(data_for_thread, 0);
+        t.operator()();
+    } else {
+        std::vector<std::thread> thds;
+        for(size_t i = 0; i < data->solvers.size(); i++) {
+            thds.push_back(thread(OneThreadAddCls(data_for_thread, i)));
+        }
+        for(std::thread& thread : thds){
+            thread.join();
+        }
     }
     bool ret = (*data_for_thread.ret == l_True);
 
@@ -525,6 +523,14 @@ DLL_PUBLIC void SATSolver::set_max_confl(int64_t max_confl)
   }
 }
 
+DLL_PUBLIC void SATSolver::set_polarity_auto()
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.polarity_mode = PolarityMode::polarmode_automatic;
+    }
+}
+
 DLL_PUBLIC void SATSolver::set_default_polarity(bool polarity)
 {
     for (size_t i = 0; i < data->solvers.size(); ++i) {
@@ -556,8 +562,9 @@ DLL_PUBLIC void SATSolver::set_allow_otf_gauss()
         Solver& s = *data->solvers[i];
         //s.conf.reconfigure_at = 0;
         //s.conf.reconfigure_val = 15;
-        s.conf.gaussconf.max_num_matrixes = 10;
+        s.conf.gaussconf.max_num_matrices = 10;
         s.conf.gaussconf.autodisable = false;
+        s.conf.xor_detach_reattach = true;
         s.conf.allow_elim_xor_vars = false;
     }
     #endif
@@ -573,18 +580,12 @@ DLL_PUBLIC void SATSolver::set_no_simplify_at_startup()
 
 DLL_PUBLIC void SATSolver::set_no_equivalent_lit_replacement()
 {
-    for (size_t i = 0; i < data->solvers.size(); ++i) {
-        Solver& s = *data->solvers[i];
-        s.conf.doFindAndReplaceEqLits = false;
-    }
+    set_scc(0);
 }
 
 DLL_PUBLIC void SATSolver::set_no_bva()
 {
-    for (size_t i = 0; i < data->solvers.size(); ++i) {
-        Solver& s = *data->solvers[i];
-        s.conf.do_bva = false;
-    }
+    set_bva(0);
 }
 
 DLL_PUBLIC void SATSolver::set_no_bve()
@@ -600,11 +601,6 @@ DLL_PUBLIC void SATSolver::set_greedy_undef()
     assert(false && "ERROR: Unfortunately, greedy undef is broken, please don't use it");
     std::cerr << "ERROR: Unfortunately, greedy undef is broken, please don't use it" << endl;
     exit(-1);
-
-    for (size_t i = 0; i < data->solvers.size(); ++i) {
-        Solver& s = *data->solvers[i];
-        s.conf.greedy_undef = true;
-    }
 }
 
 DLL_PUBLIC void SATSolver::set_sampling_vars(vector<uint32_t>* sampl_vars)
@@ -838,6 +834,17 @@ lbool calc(
 
 DLL_PUBLIC lbool SATSolver::solve(const vector< Lit >* assumptions, bool only_sampling_solution)
 {
+    if (data->promised_single_call
+        && data->num_solve_simplify_calls > 0
+    ) {
+        cout
+        << "ERROR: You promised to only call solve/simplify() once"
+        << "       by calling set_single_run(), but you violated it. Exiting."
+        << endl;
+        exit(-1);
+    }
+    data->num_solve_simplify_calls++;
+
     //set information data (props, confl, dec)
     data->previous_sum_conflicts = get_sum_conflicts();
     data->previous_sum_propagations = get_sum_propagations();
@@ -848,6 +855,17 @@ DLL_PUBLIC lbool SATSolver::solve(const vector< Lit >* assumptions, bool only_sa
 
 DLL_PUBLIC lbool SATSolver::simplify(const vector< Lit >* assumptions)
 {
+    if (data->promised_single_call
+        && data->num_solve_simplify_calls > 0
+    ) {
+        cout
+        << "ERROR: You promised to only call solve/simplify() once"
+        << "       by calling set_single_run(), but you violated it. Exiting."
+        << endl;
+        exit(-1);
+    }
+    data->num_solve_simplify_calls++;
+
     //set information data (props, confl, dec)
     data->previous_sum_conflicts = get_sum_conflicts();
     data->previous_sum_propagations = get_sum_propagations();
@@ -892,10 +910,10 @@ DLL_PUBLIC void SATSolver::new_vars(const size_t n)
     data->vars_to_add += n;
 }
 
-DLL_PUBLIC void SATSolver::add_sql_tag(const std::string& tagname, const std::string& tag)
+DLL_PUBLIC void SATSolver::add_sql_tag(const std::string& name, const std::string& val)
 {
     for(Solver* solver: data->solvers) {
-        solver->add_sql_tag(tagname, tag);
+        solver->add_sql_tag(name, val);
     }
 }
 
@@ -926,8 +944,13 @@ DLL_PUBLIC std::string SATSolver::get_text_version_info()
     #else
     ss << "c CMS is MIT licensed" << endl;
     #endif
+    ss << "c Using VMTF code by Armin Biere from CaDiCaL" << endl;
     ss << "c Using Yalsat by Armin Biere, see Balint et al. Improving implementation of SLS solvers [...], SAT'14" << endl;
     ss << "c Using WalkSAT by Henry Kautz, see Kautz and Selman Pushing the envelope: planning, propositional logic, and stochastic search, AAAI'96," << endl;
+    #ifdef USE_BREAKID
+    ss << "c Using BreakID by Devriendt, Bogaerts, Bruynooghe and Denecker" << endl;
+    ss << "c Using Bliss graph automorphism library (under LGPL) by Tommi Junttila" << endl;
+    #endif
 
     #ifdef USE_GAUSS
     ss << "c Using code from 'When Boolean Satisfiability Meets Gauss-E. in a Simplex Way'" << endl;
@@ -978,8 +1001,10 @@ DLL_PUBLIC void SATSolver::set_drat(std::ostream* os, bool add_ID)
         exit(-1);
     }
 
+    data->solvers[0]->conf.gaussconf.doMatrixFind = false;
+    data->solvers[0]->conf.doBreakid = false;
     data->solvers[0]->add_drat(os, add_ID);
-    data->solvers[0]->conf.otfHyperbin = true;
+    data->solvers[0]->conf.do_hyperbin_and_transred = true;
     data->solvers[0]->conf.doFindXors = false;
     data->solvers[0]->conf.doCompHandler = false;
 
@@ -1003,7 +1028,7 @@ DLL_PUBLIC std::vector<Lit> SATSolver::get_zero_assigned_lits() const
 
 DLL_PUBLIC unsigned long SATSolver::get_sql_id() const
 {
-    return data->solvers[0]->get_sql_id();
+    return 0;
 }
 
 DLL_PUBLIC bool SATSolver::okay() const
@@ -1038,13 +1063,13 @@ DLL_PUBLIC std::vector<std::pair<Lit, Lit> > SATSolver::get_all_binary_xors() co
 }
 
 DLL_PUBLIC vector<std::pair<vector<uint32_t>, bool> >
-SATSolver::get_recovered_xors(bool elongate) const
+SATSolver::get_recovered_xors(bool xor_together_xors) const
 {
     vector<std::pair<vector<uint32_t>, bool> > ret;
     Solver& s = *data->solvers[0];
 
     std::pair<vector<uint32_t>, bool> tmp;
-    vector<Xor> xors = s.get_recovered_xors(elongate);
+    vector<Xor> xors = s.get_recovered_xors(xor_together_xors);
     for(const auto& x: xors) {
         tmp.first = x.get_vars();
         tmp.second = x.rhs;
@@ -1179,10 +1204,15 @@ void DLL_PUBLIC SATSolver::set_up_for_scalmc()
 {
     for (size_t i = 0; i < data->solvers.size(); i++) {
         SolverConf conf = data->solvers[i]->getConf();
-        conf.gaussconf.max_num_matrixes = 2;
+        conf.doBreakid = false;
+        conf.gaussconf.max_num_matrices = 2;
         conf.gaussconf.autodisable = false;
-        conf.global_multiplier_multiplier_max = 3;
-        conf.global_timeout_multiplier_multiplier = 1.5;
+        conf.xor_detach_reattach = true;
+        conf.global_multiplier_multiplier_max = 1;
+        conf.orig_global_timeout_multiplier = 1.5;
+        conf.min_bva_gain = 2;
+        conf.xor_finder_time_limitM = 400;
+        conf.polar_stable_every_n = 100000; //i.e. never
         uint32_t xor_cut = 4;
         assert(xor_cut >= 3);
         conf.xor_var_per_cut = xor_cut-2;
@@ -1191,32 +1221,149 @@ void DLL_PUBLIC SATSolver::set_up_for_scalmc()
         conf.varElimRatioPerIter = 1;
         conf.restartType = Restart::geom;
         conf.polarity_mode = CMSat::PolarityMode::polarmode_neg;
-        conf.maple = 0;
+        conf.branch_strategy_setup = "vsids1";
+        conf.bva_every_n = 1;
         conf.do_simplify_problem = true;
+        conf.force_preserve_xors = true;
+        conf.diff_declev_for_chrono = -1;
         data->solvers[i]->setConf(conf);
     }
 }
 
-DLL_PUBLIC const std::vector<Lit>& SATSolver::get_decisions_reaching_model() const
+DLL_PUBLIC void SATSolver::set_verbosity_detach_warning(bool verb)
 {
-    if (!get_decision_reaching_valid()) {
-        cout << "ERROR: you called get_decisions_reaching_model() but it's not a valid decision set!" << endl;
-        exit(-1);
+    for (size_t i = 0; i < data->solvers.size(); i++) {
+        SolverConf conf = data->solvers[i]->getConf();
+        conf.xor_detach_verb = verb;
+        data->solvers[i]->setConf(conf);
     }
-    return data->solvers[data->which_solved]->get_decisions_reaching_model();
 }
 
-DLL_PUBLIC void SATSolver::set_need_decisions_reaching()
+DLL_PUBLIC void SATSolver::add_empty_cl_to_drat()
+{
+    data->solvers[data->which_solved]->add_empty_cl_to_drat();
+}
+
+DLL_PUBLIC void SATSolver::set_single_run()
+{
+    if (data->num_solve_simplify_calls > 0) {
+        cout << "ERROR: You must call set_single_run() before solving" << endl;
+        exit(-1);
+    }
+    data->promised_single_call = true;
+
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.breakid_use_assump = false;
+    }
+}
+
+DLL_PUBLIC void SATSolver::set_var_weight(Lit lit, double weight)
+{
+    actually_add_clauses_to_threads(data);
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.set_var_weight(lit, weight);
+    }
+}
+
+DLL_PUBLIC vector<uint32_t> SATSolver::get_var_incidence()
+{
+    return data->solvers[data->which_solved]->get_outside_var_incidence();
+}
+
+DLL_PUBLIC vector<uint32_t> SATSolver::get_var_incidence_also_red()
+{
+    return data->solvers[data->which_solved]->get_outside_var_incidence_also_red();
+}
+
+DLL_PUBLIC void SATSolver::set_intree_probe(int val)
 {
     for (size_t i = 0; i < data->solvers.size(); ++i) {
         Solver& s = *data->solvers[i];
-        s.conf.need_decisions_reaching = true;
+        s.conf.doIntreeProbe = val;
     }
 }
 
-DLL_PUBLIC bool SATSolver::get_decision_reaching_valid() const
+DLL_PUBLIC void SATSolver::set_no_confl_needed()
 {
-    return data->solvers[data->which_solved]->get_decision_reaching_valid();
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.conf_needed = false;
+    }
+}
+
+
+DLL_PUBLIC bool SATSolver::implied_by(
+    const std::vector<Lit>& lits,
+    std::vector<Lit>& out_implied
+)
+{
+    return data->solvers[data->which_solved]->implied_by(lits, out_implied);
+}
+
+DLL_PUBLIC void SATSolver::set_full_bve(int val)
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.do_full_varelim = val;
+    }
+}
+
+DLL_PUBLIC void SATSolver::set_sls(int val)
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.doSLS = val;
+    }
+}
+
+DLL_PUBLIC void SATSolver::reset_vsids()
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.reset_vsids();
+    }
+}
+
+DLL_PUBLIC void SATSolver::set_scc(int val)
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.doFindAndReplaceEqLits = val;
+    }
+}
+
+DLL_PUBLIC void SATSolver::set_distill(int val)
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.do_distill_clauses = val;
+    }
+}
+
+DLL_PUBLIC void SATSolver::set_bva(int val)
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.do_bva = val;
+    }
+}
+
+DLL_PUBLIC void SATSolver::set_full_bve_iter_ratio(double val)
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.varElimRatioPerIter = val;
+    }
+}
+
+DLL_PUBLIC void SATSolver::set_xor_detach(bool val)
+{
+    for (size_t i = 0; i < data->solvers.size(); ++i) {
+        Solver& s = *data->solvers[i];
+        s.conf.xor_detach_reattach = val;
+    }
 }
 
 
@@ -1227,12 +1374,4 @@ DLL_PUBLIC void SATSolver::set_yes_comphandler()
         s.conf.doCompHandler = true;
         s.enable_comphandler();
     }
-}
-
-DLL_PUBLIC bool SATSolver::implied_by(
-    const std::vector<Lit>& lits,
-    std::vector<Lit>& out_implied
-)
-{
-    return data->solvers[data->which_solved]->implied_by(lits, out_implied);
 }

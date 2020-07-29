@@ -67,7 +67,6 @@ class Main: public MainCommon
         void manually_parse_some_options();
         void parse_restart_type();
         void parse_polarity_type();
-        void dump_decisions_for_model();
         void check_num_threads_sanity(const unsigned thread_num) const;
 
         po::positional_options_description p;
@@ -101,6 +100,7 @@ class Main: public MainCommon
         int correctReturnValue(const lbool ret) const;
         lbool multi_solutions();
         void dump_red_file();
+        void ban_found_solution();
 
         //Config
         std::string resultFilename;
@@ -108,9 +108,9 @@ class Main: public MainCommon
         int printResult = true;
         string commandLine;
         uint32_t max_nr_of_solutions = 1;
+        bool dont_ban_solutions = false;
         int sql = 0;
         string sqlite_filename;
-        string decisions_for_model_fname;
         double maxtime;
         uint64_t maxconfl;
 
@@ -118,6 +118,8 @@ class Main: public MainCommon
         vector<uint32_t> sampling_vars;
         std::string sampling_vars_str = "";
         bool only_sampling_solution = false;
+        std::string assump_filename;
+        vector<Lit> assumps;
 
 
         //Files to read & write

@@ -99,7 +99,7 @@ bool InTree::check_timeout_due_to_hyperbin()
             << endl;
         }
 
-        solver->conf.otfHyperbin = false;
+        solver->conf.do_hyperbin_and_transred = false;
         return true;
     }
 
@@ -334,7 +334,7 @@ bool InTree::handle_lit_popped_from_queue(const Lit lit, const Lit other_lit, co
 
         //Should do HHBR here
         bool ok;
-        if (solver->conf.otfHyperbin) {
+        if (solver->conf.do_hyperbin_and_transred) {
             uint64_t max_hyper_time = std::numeric_limits<uint64_t>::max();
             if (!solver->drat->enabled() &&
                 !solver->conf.simulate_drat
@@ -385,7 +385,7 @@ bool InTree::empty_failed_list()
             solver->enqueue(lit);
             *(solver->drat) << add << lit
             #ifdef STATS_NEEDED
-            << solver->clauseID++
+            << 0
             << solver->sumConflicts
             #endif
             << fin;
@@ -396,14 +396,14 @@ bool InTree::empty_failed_list()
         } else if (solver->value(lit) == l_False) {
             *(solver->drat) << add << ~lit
             #ifdef STATS_NEEDED
-            << solver->clauseID++
+            << 0
             << solver->sumConflicts
             #endif
             << fin;
 
             *(solver->drat) << add
             #ifdef STATS_NEEDED
-            << solver->clauseID++
+            << 0
             << solver->sumConflicts
             #endif
             << fin;
