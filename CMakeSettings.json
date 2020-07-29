@@ -2,13 +2,13 @@
   "configurations": [
     {
       "name": "x64-Release",
-      "generator": "Ninja",
+      "generator": "Visual Studio 16 2019 Win64",
       "configurationType": "Release",
       "inheritEnvironments": [ "msvc_x64_x64" ],
       "buildRoot": "${projectDir}\\out\\build\\${name}",
       "installRoot": "${projectDir}\\out\\install\\${name}",
       "cmakeCommandArgs": "",
-      "buildCommandArgs": "-v",
+      "buildCommandArgs": "",
       "ctestCommandArgs": "",
       "variables": [
         {
@@ -22,21 +22,27 @@
           "type": "BOOL"
         },
         {
-          "name": "ENABLE_ASSERTIONS",
-          "value": "False",
-          "type": "BOOL"
-        },
-        {
-          "name": "ENABLE_PYTHON_INTERFACE",
-          "value": "False",
+          "name": "ONLY_SIMPLE",
+          "value": "True",
           "type": "BOOL"
         },
         {
           "name": "BOOST_ROOT",
-          "value": "C:\\Users\\de\\Source\\Projects\\boost_1_59_0\\install",
+          "value": "C:\\Users\\de\\Source\\Projects\\boost_1_62_0",
           "type": "PATH"
+        },
+        {
+          "name": "MANPAGE",
+          "value": "False",
+          "type": "BOOL"
+        },
+        {
+          "name": "CMAKE_BUILD_TYPE",
+          "value": "Release",
+          "type": "STRING"
         }
-      ]
+      ],
+      "intelliSenseMode": "windows-msvc-x64"
     }
   ]
 }
